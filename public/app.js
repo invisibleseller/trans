@@ -1,6 +1,25 @@
 // SPA client. Hash routing for top-level views (#/, #/login, #/account).
 // Room session is in-memory only.
 
+// Wrap fetch so a stale or missing site-gate cookie bounces the user back to
+// /site-auth instead of crashing JSON.parse on a "gate_required" body.
+const _origFetch = window.fetch.bind(window);
+window.fetch = async function (...args) {
+  const resp = await _origFetch(...args);
+  if (resp.status === 401) {
+    const ct = resp.headers.get('content-type') || '';
+    if (!ct.includes('json')) {
+      const txt = await resp.clone().text();
+      if (txt.trim() === 'gate_required') {
+        const next = encodeURIComponent(location.pathname + location.search + location.hash);
+        location.href = '/site-auth?next=' + next;
+        throw new Error('gate_required');
+      }
+    }
+  }
+  return resp;
+};
+
 const LANGS = [
   { code: 'zh', name: '中文',     english: 'Chinese',  whisper: 'zh' },
   { code: 'en', name: 'English',  english: 'English',  whisper: 'en' },
