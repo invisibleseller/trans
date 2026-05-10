@@ -148,7 +148,17 @@ export default {
       }
     }
 
-    // ---------- Auth (HTTP) ----------
+    // ---------- Auth (HTTP) — dormant in invite-only mode (no DB binding) ----------
+
+    if (!env.DB && (
+      url.pathname.startsWith('/api/auth/') ||
+      url.pathname.startsWith('/auth/') ||
+      url.pathname === '/api/me' ||
+      url.pathname === '/api/me/usage' ||
+      url.pathname === '/api/redeem'
+    )) {
+      return json({ error: 'accounts_disabled' }, 503);
+    }
 
     if (url.pathname === '/api/auth/magic' && method === 'POST') {
       const body = await readJSON(request) || {};
@@ -272,7 +282,7 @@ export default {
       innerUrl.pathname = '/' + action;
 
       const headers = new Headers(request.headers);
-      if (action === 'ws') {
+      if (action === 'ws' && env.DB) {
         const sess = await authenticateRequest(env, request);
         if (sess) {
           headers.set('X-User-Id', sess.user_id);

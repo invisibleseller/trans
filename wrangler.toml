@@ -14,14 +14,14 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
-# D1 database. Create first with:
+# D1 database — disabled for the invite-only mode (no accounts / no codes).
+# Re-enable later when turning paid features back on:
 #   npx wrangler d1 create realtime-interp-db
-# Then paste the returned database_id below and apply migrations:
 #   npx wrangler d1 execute realtime-interp-db --remote --file=./migrations/0001_init.sql
-[[d1_databases]]
-binding = "DB"
-database_name = "realtime-interp-db"
-database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "realtime-interp-db"
+# database_id = "..."
 
 [vars]
 MODEL = "gpt-4o-realtime-preview"
