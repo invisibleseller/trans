@@ -298,7 +298,13 @@ export default {
       return stub.fetch(innerReq);
     }
 
-    if (env.ASSETS) return env.ASSETS.fetch(request);
+    if (env.ASSETS) {
+      const resp = await env.ASSETS.fetch(request);
+      // Don't let browsers serve stale HTML / JS across deploys.
+      const headers = new Headers(resp.headers);
+      headers.set('cache-control', 'no-cache, must-revalidate');
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+    }
     return new Response('not found', { status: 404 });
   },
 };
