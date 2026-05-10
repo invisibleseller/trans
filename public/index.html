@@ -8,11 +8,20 @@
 </head>
 <body>
 
+<nav id="topnav">
+  <a href="#/" class="brand">实时同传</a>
+  <div class="nav-right">
+    <span id="navBalance" class="nav-balance" hidden></span>
+    <a href="#/account" class="nav-link" id="navAccount" hidden>账户</a>
+    <a href="#/login" class="nav-link" id="navLogin">登录</a>
+  </div>
+</nav>
+
 <!-- ============ HOME ============ -->
 <section id="view-home" class="view active">
   <div class="card">
     <h1>实时同传对话</h1>
-    <p class="lede">两人各说各的语言，对方实时看见自己语言的字幕。免费试用每人 30 秒语音。</p>
+    <p class="lede">两人各说各的语言，对方实时看见自己语言的字幕。免费试用每人 30 秒语音；登录账户后用余额扣费。</p>
     <div class="home-actions">
       <button class="btn primary big" id="goCreate">创建房间</button>
       <button class="btn big" id="goJoin">加入房间</button>
@@ -70,6 +79,60 @@
   </div>
 </section>
 
+<!-- ============ LOGIN ============ -->
+<section id="view-login" class="view">
+  <div class="card">
+    <a href="#" class="back" data-back>← 返回</a>
+    <h1>登录 / 注册</h1>
+    <p class="lede">登录后可充值时长。同一邮箱 / 同一第三方账号视为同一用户。</p>
+
+    <form id="magicForm">
+      <label>
+        邮箱
+        <input id="magicEmail" type="email" required placeholder="you@example.com">
+      </label>
+      <div class="form-actions">
+        <button class="btn primary" type="submit" id="magicBtn">发送登录链接</button>
+      </div>
+      <p id="magicMsg" class="msg" hidden></p>
+      <p id="magicErr" class="err" hidden></p>
+    </form>
+
+    <div id="oauthBlock" class="oauth-block" hidden>
+      <div class="divider"><span>或</span></div>
+      <a id="loginGoogle" class="btn oauth google" href="/auth/google" hidden>使用 Google 登录</a>
+      <a id="loginWechat" class="btn oauth wechat" href="/auth/wechat" hidden>使用 微信 扫码登录</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ACCOUNT ============ -->
+<section id="view-account" class="view">
+  <div class="card">
+    <a href="#" class="back" data-back>← 返回</a>
+    <h1>我的账户</h1>
+    <div id="accountInfo" class="account-info">
+      <div class="balance-pill" id="balancePill">余额：—</div>
+      <div class="account-meta">
+        <span id="accountIdentity">—</span>
+        <button class="btn small" id="logoutBtn">退出登录</button>
+      </div>
+    </div>
+
+    <h2>充值（兑换码）</h2>
+    <form id="redeemForm" class="inline-form">
+      <input id="redeemCode" type="text" autocomplete="off" placeholder="RTI-XXXX-XXXX-XXXX" required>
+      <button class="btn primary" type="submit" id="redeemBtn">兑换</button>
+    </form>
+    <p id="redeemMsg" class="msg" hidden></p>
+    <p id="redeemErr" class="err" hidden></p>
+    <p class="hint">从运营方那里购买兑换码后在此填入。当前定价：1 / 3 / 5 / 10 / 30 / 60 分钟，30 分钟 ¥88 为推荐档。</p>
+
+    <h2>最近使用</h2>
+    <ul id="usageList" class="usage-list"><li class="muted">加载中…</li></ul>
+  </div>
+</section>
+
 <!-- ============ ROOM ============ -->
 <section id="view-room" class="view room">
   <header class="room-bar">
@@ -86,7 +149,7 @@
       <span class="peer-lang" id="peerLangLabel">对方未到</span>
     </div>
     <div class="controls">
-      <span id="quota" class="quota" title="试用语音输入余额">—</span>
+      <span id="quota" class="quota" title="本次会话可用时长">—</span>
       <span id="status" class="status">连接中…</span>
       <button id="micBtn" class="btn primary">开始说话</button>
       <button id="leaveBtn" class="btn">离开</button>
@@ -99,7 +162,7 @@
       <div id="incoming" class="lines big-lines" aria-live="polite"></div>
     </section>
     <section class="pane secondary-pane">
-      <header class="pane-head">我说的（识别 / 已发送译文）</header>
+      <header class="pane-head">我说的（原文 + 已发送译文）</header>
       <div id="outgoing" class="lines" aria-live="polite"></div>
     </section>
   </main>

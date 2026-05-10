@@ -14,10 +14,28 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
-# Non-secret config. Override in dashboard or via wrangler.
+# D1 database. Create first with:
+#   npx wrangler d1 create realtime-interp-db
+# Then paste the returned database_id below and apply migrations:
+#   npx wrangler d1 execute realtime-interp-db --remote --file=./migrations/0001_init.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "realtime-interp-db"
+database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+
 [vars]
 MODEL = "gpt-4o-realtime-preview"
 TRIAL_SECONDS = "30"
 
-# Required secret (set with `wrangler secret put OPENAI_API_KEY`):
-#   OPENAI_API_KEY = sk-...
+# Required secret (Cloudflare dashboard → Settings → Variables, or):
+#   npx wrangler secret put OPENAI_API_KEY
+#
+# Optional secrets — when set, these features light up:
+#   RESEND_API_KEY      enables real email sending for magic links
+#   EMAIL_FROM          [vars] addr; must be a domain verified in Resend
+#   GOOGLE_CLIENT_ID    enables Google sign-in
+#   GOOGLE_CLIENT_SECRET
+#   WECHAT_APP_ID       enables WeChat 扫码 sign-in (also needs 开放平台 资质)
+#   WECHAT_APP_SECRET
+#   PUBLIC_ORIGIN       optional, e.g. https://talk.example.com (otherwise
+#                       derived from request URL)

@@ -1,11 +1,5 @@
-// 1-to-1 realtime interpreter client.
-//
-// Browser <—WS—> Cloudflare Worker:
-//   /api/rooms/:id/ws   room signaling, peer subtitle relay, quota updates
-//   /api/rooms/:id/oai  reverse proxy to OpenAI Realtime over WebSocket
-//
-// All audio leaves the browser as base64 PCM16 @ 24 kHz over the proxy WS.
-// No direct connection to api.openai.com is required from the browser.
+// SPA client. Hash routing for top-level views (#/, #/login, #/account).
+// Room session is in-memory only.
 
 const LANGS = [
   { code: 'zh', name: '中文',     english: 'Chinese',  whisper: 'zh' },
@@ -18,13 +12,18 @@ const LANGS = [
 
 const SAMPLE_RATE = 24000;
 const BYTES_PER_SAMPLE = 2;
-const AUDIO_BATCH_FRAMES = 8;       // ~43 ms per outgoing chunk @ 24 kHz
+const AUDIO_BATCH_FRAMES = 8;
 
 const $ = (id) => document.getElementById(id);
 const langByCode = (c) => LANGS.find((l) => l.code === c) || LANGS[0];
 
 const prefs = {
   myLang: localStorage.getItem('rti_my_lang') || 'zh',
+};
+
+const session = {
+  me: null,         // { authenticated, userId, email, balanceSeconds, ... }
+  config: null,     // { trialSeconds, loginMethods }
 };
 
 const room = {
@@ -37,10 +36,10 @@ const room = {
   myLanguage: prefs.myLang,
   model: null,
   ticket: null,
+  anonymous: true,
   trialSeconds: 30,
-  usedBytes: 0,
+  remainingSeconds: 0,
 
-  // Realtime proxy WS + audio pipeline
   oai: null,
   audioCtx: null,
   audioSource: null,
@@ -48,23 +47,56 @@ const room = {
   stream: null,
   audioBatch: [],
 
-  // UI rendering state
-  outgoingLines: new Map(),       // userItemId -> { el, text, done }
-  outgoingResponses: new Map(),   // responseId -> { el, text, sentLen, done }
-  incomingLines: new Map(),       // subtitleId -> { el }
+  // Outgoing pane: each user item gets a block with [source] + [translation].
+  // userItemId -> { containerEl, sourceEl, translationEl, sourceText, translationText, sourceDone, translationDone }
+  outgoingBlocks: new Map(),
+  // Map responseId -> userItemId, to glue model translation back to user item.
+  responseToItem: new Map(),
+  // For chunks of text relayed to peer (don't include their full text every chunk).
+  responseSentLen: new Map(),
   lastUserItemId: null,
+  // Incoming pane: peer's translated speech in our language.
+  incomingLines: new Map(),
 
   micEnabled: false,
 };
 
-// ---------- View routing ----------
+// ---------- Hash routing ----------
+
+const VIEW_BY_HASH = {
+  '':         'view-home',
+  '#/':       'view-home',
+  '#/login':  'view-login',
+  '#/account':'view-account',
+};
 
 function showView(id) {
   for (const v of document.querySelectorAll('.view')) v.classList.remove('active');
   $(id).classList.add('active');
 }
+
+function applyHashRoute() {
+  // Room view is opened imperatively, not via hash.
+  if ($('view-room').classList.contains('active') && location.hash.startsWith('#/')) {
+    // Leaving room view via nav click.
+    leaveRoom();
+  }
+  const h = location.hash || '#/';
+  const v = VIEW_BY_HASH[h] || 'view-home';
+  if (v === 'view-account') {
+    if (!session.me?.authenticated) { location.hash = '#/login'; return; }
+    refreshAccount();
+  }
+  if (v === 'view-login' && session.me?.authenticated) {
+    location.hash = '#/account'; return;
+  }
+  showView(v);
+}
+
+window.addEventListener('hashchange', applyHashRoute);
+
 document.querySelectorAll('[data-back]').forEach((a) => {
-  a.addEventListener('click', (e) => { e.preventDefault(); showView('view-home'); });
+  a.addEventListener('click', (e) => { e.preventDefault(); location.hash = '#/'; });
 });
 $('goCreate').onclick = () => showView('view-create');
 $('goJoin').onclick   = () => showView('view-join');
@@ -82,7 +114,155 @@ fillLangSelect($('createLang'), prefs.myLang);
 fillLangSelect($('joinLang'),   prefs.myLang);
 fillLangSelect($('myLang'),     prefs.myLang);
 
-// ---------- Create / Join ----------
+// ---------- Boot: load /api/config + /api/me ----------
+
+(async function boot() {
+  try {
+    const [cfg, me] = await Promise.all([
+      fetch('/api/config').then(r => r.json()).catch(() => ({})),
+      fetch('/api/me').then(r => r.json()).catch(() => ({ authenticated: false })),
+    ]);
+    session.config = cfg || {};
+    session.me = me || { authenticated: false };
+  } catch {
+    session.me = { authenticated: false };
+    session.config = {};
+  }
+  updateNav();
+  updateLoginButtons();
+  applyHashRoute();
+})();
+
+function updateNav() {
+  if (session.me?.authenticated) {
+    $('navLogin').hidden = true;
+    $('navAccount').hidden = false;
+    $('navBalance').hidden = false;
+    $('navBalance').textContent = '余额 ' + fmtSeconds(session.me.balanceSeconds);
+  } else {
+    $('navLogin').hidden = false;
+    $('navAccount').hidden = true;
+    $('navBalance').hidden = true;
+  }
+}
+
+function updateLoginButtons() {
+  const m = session.config?.loginMethods || {};
+  $('loginGoogle').hidden = !m.google;
+  $('loginWechat').hidden = !m.wechat;
+  $('oauthBlock').hidden = !(m.google || m.wechat);
+}
+
+function fmtSeconds(s) {
+  s = Number(s || 0);
+  if (s < 60) return s.toFixed(1) + ' 秒';
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return m + ' 分 ' + (r ? r + ' 秒' : '');
+}
+
+// ---------- Login / Magic link ----------
+
+$('magicForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const email = $('magicEmail').value.trim().toLowerCase();
+  $('magicErr').hidden = true; $('magicMsg').hidden = true;
+  $('magicBtn').disabled = true;
+  try {
+    const r = await fetch('/api/auth/magic', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'failed');
+    showFlash('magicMsg', '邮件已发送，请打开邮箱中的登录链接（15 分钟内有效）。');
+  } catch (err) {
+    showFlash('magicErr', err.message || String(err), true);
+  } finally {
+    $('magicBtn').disabled = false;
+  }
+});
+
+function showFlash(id, text, isErr = false) {
+  const el = $(id);
+  el.textContent = text;
+  el.hidden = false;
+}
+
+// ---------- Account ----------
+
+async function refreshAccount() {
+  // Refresh balance.
+  const me = await fetch('/api/me').then(r => r.json()).catch(() => null);
+  if (!me?.authenticated) { location.hash = '#/login'; return; }
+  session.me = me;
+  updateNav();
+  $('balancePill').textContent = '余额：' + fmtSeconds(me.balanceSeconds);
+  const identity = [me.email, me.displayName].filter(Boolean).join(' · ') || '匿名账户';
+  $('accountIdentity').textContent = identity;
+
+  // Recent usage.
+  const ul = $('usageList');
+  ul.innerHTML = '<li class="muted">加载中…</li>';
+  try {
+    const data = await fetch('/api/me/usage').then(r => r.json());
+    if (!data.usage || !data.usage.length) {
+      ul.innerHTML = '<li class="muted">暂无记录</li>';
+    } else {
+      ul.innerHTML = '';
+      for (const u of data.usage) {
+        const li = document.createElement('li');
+        const left = document.createElement('span');
+        left.textContent = u.reason || '使用';
+        const right = document.createElement('span');
+        const credit = u.seconds < 0;
+        right.className = credit ? 'credit' : 'debit';
+        right.textContent = (credit ? '+' : '-') + fmtSeconds(Math.abs(u.seconds));
+        li.append(left, right);
+        ul.appendChild(li);
+      }
+    }
+  } catch {
+    ul.innerHTML = '<li class="muted">加载失败</li>';
+  }
+}
+
+$('logoutBtn').onclick = async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  session.me = { authenticated: false };
+  updateNav();
+  location.hash = '#/';
+};
+
+$('redeemForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('redeemErr').hidden = true; $('redeemMsg').hidden = true;
+  const code = $('redeemCode').value.trim().toUpperCase();
+  if (!code) return;
+  $('redeemBtn').disabled = true;
+  try {
+    const r = await fetch('/api/redeem', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      const msgs = { invalid: '兑换码无效', used: '兑换码已被使用', empty: '请输入兑换码', unauthenticated: '请先登录' };
+      throw new Error(msgs[data.error] || data.error || '兑换失败');
+    }
+    showFlash('redeemMsg', `兑换成功，已到账 ${fmtSeconds(data.seconds)}。`);
+    $('redeemCode').value = '';
+    refreshAccount();
+  } catch (err) {
+    showFlash('redeemErr', err.message || String(err), true);
+  } finally {
+    $('redeemBtn').disabled = false;
+  }
+});
+
+// ---------- Create / Join room ----------
 
 $('createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -119,7 +299,7 @@ $('joinForm').addEventListener('submit', (e) => {
 
 function showErr(id, msg) { const el = $(id); el.textContent = msg; el.hidden = false; }
 
-// ---------- Room view ----------
+// ---------- Room ----------
 
 function enterRoom(roomId, password, myLang) {
   room.id = roomId;
@@ -129,7 +309,7 @@ function enterRoom(roomId, password, myLang) {
   $('myLang').value = myLang;
   setStatus('连接房间…');
   setPeerLabel(null);
-  resetLines();
+  resetRoomPanes();
   showView('view-room');
   connectWS();
 }
@@ -144,21 +324,23 @@ function setPeerLabel(language) {
   if (!language) { el.textContent = '对方未到'; el.classList.remove('connected'); }
   else { el.textContent = '对方说 ' + langByCode(language).name; el.classList.add('connected'); }
 }
-function resetLines() {
+function resetRoomPanes() {
   $('incoming').innerHTML = '';
   $('outgoing').innerHTML = '';
-  room.outgoingLines.clear();
-  room.outgoingResponses.clear();
+  room.outgoingBlocks.clear();
+  room.responseToItem.clear();
+  room.responseSentLen.clear();
   room.incomingLines.clear();
   room.lastUserItemId = null;
 }
-function bytesToSeconds(b) { return b / (SAMPLE_RATE * BYTES_PER_SAMPLE); }
 function updateQuotaUI() {
-  const totalSec = room.trialSeconds;
-  const usedSec = bytesToSeconds(room.usedBytes);
-  const remaining = Math.max(0, totalSec - usedSec);
+  const remaining = Math.max(0, Number(room.remainingSeconds || 0));
   const el = $('quota');
-  el.textContent = `试用 ${remaining.toFixed(1)}s / ${totalSec}s`;
+  if (room.anonymous) {
+    el.textContent = `试用剩余 ${remaining.toFixed(1)}s / ${room.trialSeconds}s`;
+  } else {
+    el.textContent = `余额剩余 ${fmtSeconds(remaining)}`;
+  }
   el.classList.toggle('low', remaining > 0 && remaining < 10);
   el.classList.toggle('empty', remaining <= 0);
 }
@@ -176,12 +358,12 @@ $('copyRoom').onclick = async () => {
   try { await navigator.clipboard.writeText(room.id); setStatus('房间号已复制', 'live'); }
   catch {}
 };
-$('leaveBtn').onclick = () => { leaveRoom(); showView('view-home'); };
+$('leaveBtn').onclick = () => { leaveRoom(); location.hash = '#/'; };
 $('micBtn').onclick = async () => {
   if (room.micEnabled) { stopMic(); return; }
   if (!room.peerPresent) { setStatus('请等对方加入', 'warn'); return; }
-  if (bytesToSeconds(room.usedBytes) >= room.trialSeconds) {
-    setStatus('试用额度已用完', 'err');
+  if (Number(room.remainingSeconds || 0) <= 0) {
+    setStatus(room.anonymous ? '试用额度已用完，登录后充值可继续' : '余额不足', 'err');
     return;
   }
   try { await startMic(); }
@@ -191,8 +373,6 @@ $('micBtn').onclick = async () => {
     stopMic();
   }
 };
-
-// ---------- Signaling WS ----------
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -208,8 +388,7 @@ function connectWS() {
     setStatus('鉴权中…');
   };
   ws.onmessage = (evt) => {
-    let msg;
-    try { msg = JSON.parse(evt.data); } catch { return; }
+    let msg; try { msg = JSON.parse(evt.data); } catch { return; }
     handleServerMsg(msg);
   };
   ws.onclose = () => {
@@ -228,8 +407,13 @@ function handleServerMsg(msg) {
       room.peerLanguage = msg.peerLanguage || null;
       room.model = msg.model || room.model;
       room.ticket = msg.ticket || null;
+      room.anonymous = !!msg.anonymous;
       room.trialSeconds = Number(msg.trialSeconds || 30);
-      room.usedBytes = Number(msg.usedBytes || 0);
+      if (msg.anonymous) {
+        room.remainingSeconds = Math.max(0, room.trialSeconds - Number(msg.trialUsedSeconds || 0));
+      } else {
+        room.remainingSeconds = Number(msg.balanceSeconds || 0);
+      }
       setPeerLabel(room.peerLanguage);
       setStatus(room.peerPresent ? '已就绪' : '等待对方加入…', room.peerPresent ? 'live' : 'warn');
       updateQuotaUI();
@@ -260,24 +444,20 @@ function handleServerMsg(msg) {
       renderIncoming(msg.id, msg.text, msg.final);
       break;
     case 'quota_update':
-      room.usedBytes = Number(msg.usedBytes || room.usedBytes);
+      room.remainingSeconds = Number(msg.remainingSeconds || 0);
       updateQuotaUI();
       break;
     case 'quota_exceeded':
-      room.usedBytes = Number(msg.usedBytes || room.usedBytes);
+      room.remainingSeconds = 0;
       updateQuotaUI();
-      setStatus('试用额度已用完', 'err');
+      setStatus(msg.reason === 'balance' ? '余额已用完' : '试用额度已用完', 'err');
       stopMic();
       break;
     case 'error':
       if (msg.error === 'bad_password') {
-        showErr('joinErr', '房间密码错误');
-        leaveRoom();
-        showView('view-join');
+        showErr('joinErr', '房间密码错误'); leaveRoom(); showView('view-join');
       } else if (msg.error === 'room_full') {
-        showErr('joinErr', '该房间已有两人在线');
-        leaveRoom();
-        showView('view-join');
+        showErr('joinErr', '该房间已有两人在线'); leaveRoom(); showView('view-join');
       } else {
         setStatus('错误: ' + (msg.detail || msg.error), 'err');
       }
@@ -294,7 +474,7 @@ function leaveRoom() {
   room.ticket = null;
 }
 
-// ---------- Realtime over WS proxy + AudioWorklet ----------
+// ---------- Realtime (WS proxy) ----------
 
 function buildInstructions() {
   const src = langByCode(room.myLanguage);
@@ -303,14 +483,11 @@ function buildInstructions() {
     `You are a professional simultaneous interpreter. ` +
     `The user speaks ${src.english}. ` +
     `Translate every utterance into natural, idiomatic ${tgt.english}. ` +
-    `Output ONLY the ${tgt.english} translation — no explanations, no source text, ` +
-    `no quotation marks, no language labels. ` +
-    `Preserve the speaker's tone. ` +
-    `Begin emitting translation as soon as enough has been said; do not wait for the full sentence. ` +
+    `Output ONLY the ${tgt.english} translation — no explanations, no source text, no labels. ` +
+    `Preserve tone. Begin emitting as soon as enough has been said; do not wait for the full sentence. ` +
     `Keep proper nouns and well-known technical terms in their conventional form.`
   );
 }
-
 function buildSessionConfig() {
   const src = langByCode(room.myLanguage);
   return {
@@ -328,7 +505,6 @@ function buildSessionConfig() {
     temperature: 0.6,
   };
 }
-
 function sendSessionUpdate() {
   room.oai.send(JSON.stringify({ type: 'session.update', session: buildSessionConfig() }));
 }
@@ -336,7 +512,7 @@ function sendSessionUpdate() {
 async function ensureTicket() {
   if (room.ticket) return;
   await new Promise((resolve, reject) => {
-    let timer = setTimeout(() => reject(new Error('ticket timeout')), 3000);
+    const timer = setTimeout(() => reject(new Error('ticket timeout')), 3000);
     const onMsg = (evt) => {
       let m; try { m = JSON.parse(evt.data); } catch { return; }
       if (m.type === 'ticket') {
@@ -354,18 +530,14 @@ async function startMic() {
   setStatus('请求麦克风…');
   room.stream = await navigator.mediaDevices.getUserMedia({
     audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      channelCount: 1,
-      sampleRate: SAMPLE_RATE,
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      channelCount: 1, sampleRate: SAMPLE_RATE,
     },
   });
 
   await ensureTicket();
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ticket = room.ticket;
-  room.ticket = null; // consumed
+  const ticket = room.ticket; room.ticket = null;
   const oaiUrl = `${proto}//${location.host}/api/rooms/${encodeURIComponent(room.id)}/oai?ticket=${encodeURIComponent(ticket)}`;
 
   setStatus('连接 Realtime…');
@@ -375,13 +547,11 @@ async function startMic() {
 
   await new Promise((resolve, reject) => {
     const onOpen = () => { oai.removeEventListener('open', onOpen); resolve(); };
-    const onErr = () => { reject(new Error('proxy ws failed')); };
     oai.addEventListener('open', onOpen);
-    oai.addEventListener('error', onErr, { once: true });
+    oai.addEventListener('error', () => reject(new Error('proxy ws failed')), { once: true });
   });
 
   sendSessionUpdate();
-
   oai.addEventListener('message', (e) => {
     if (typeof e.data !== 'string') return;
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
@@ -389,14 +559,9 @@ async function startMic() {
   });
   oai.addEventListener('close', () => stopMic());
 
-  // Audio pipeline. AudioContext sample rate falls back to whatever the
-  // browser actually gives us; we resample if needed.
   let ctx;
-  try {
-    ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  } catch {
-    ctx = new AudioContext();
-  }
+  try { ctx = new AudioContext({ sampleRate: SAMPLE_RATE }); }
+  catch { ctx = new AudioContext(); }
   room.audioCtx = ctx;
   await ctx.audioWorklet.addModule('/pcm-worklet.js');
   room.audioSource = ctx.createMediaStreamSource(room.stream);
@@ -404,22 +569,16 @@ async function startMic() {
 
   const needResample = ctx.sampleRate !== SAMPLE_RATE;
   const ratio = ctx.sampleRate / SAMPLE_RATE;
-  let resampleCarry = 0;
 
   room.audioBatch = [];
   let batchSamples = 0;
 
   room.audioNode.port.onmessage = (e) => {
     if (!room.oai || room.oai.readyState !== 1) return;
-
     let samples = new Int16Array(e.data);
-    if (needResample) {
-      samples = downsampleInt16(samples, ratio, resampleCarryRef);
-    }
-
+    if (needResample) samples = downsampleInt16(samples, ratio);
     room.audioBatch.push(samples);
     batchSamples += samples.length;
-
     if (room.audioBatch.length >= AUDIO_BATCH_FRAMES) {
       const merged = new Int16Array(batchSamples);
       let off = 0;
@@ -436,8 +595,6 @@ async function startMic() {
   };
 
   room.audioSource.connect(room.audioNode);
-  // Intentionally do not connect to ctx.destination — we don't want to hear
-  // our own voice routed back out.
   if (ctx.state === 'suspended') await ctx.resume();
 
   room.micEnabled = true;
@@ -447,28 +604,13 @@ async function startMic() {
   setStatus('正在聆听', 'live');
 }
 
-const resampleCarryRef = { remainder: 0 };
-
-function downsampleInt16(input, ratio, carry) {
-  // Simple nearest-neighbor resample. Good enough for speech-to-text.
+function downsampleInt16(input, ratio) {
   if (ratio === 1) return input;
-  const outLen = Math.floor((input.length - carry.remainder) / ratio);
-  if (outLen <= 0) {
-    carry.remainder -= input.length;
-    if (carry.remainder < 0) carry.remainder = 0;
-    return new Int16Array(0);
-  }
+  const outLen = Math.floor(input.length / ratio);
   const out = new Int16Array(outLen);
-  let srcIdx = carry.remainder;
-  for (let i = 0; i < outLen; i++) {
-    out[i] = input[Math.floor(srcIdx)];
-    srcIdx += ratio;
-  }
-  carry.remainder = srcIdx - input.length;
-  if (carry.remainder < 0) carry.remainder = 0;
+  for (let i = 0; i < outLen; i++) out[i] = input[Math.floor(i * ratio)];
   return out;
 }
-
 function base64FromInt16(int16) {
   const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
   let s = '';
@@ -494,21 +636,26 @@ function stopMic() {
   if (room.peerPresent && room.ws) setStatus('已就绪', 'live');
 }
 
-// ---------- Realtime event → UI + relay ----------
+// ---------- Realtime event handling ----------
 
 function handleRealtimeEvent(ev) {
   switch (ev.type) {
     case 'conversation.item.created':
       if (ev.item && ev.item.role === 'user') {
         room.lastUserItemId = ev.item.id;
-        ensureOutgoingSelfLine(ev.item.id);
+        ensureOutgoingBlock(ev.item.id);
       }
       break;
     case 'conversation.item.input_audio_transcription.delta':
-      appendOutgoingSelf(ev.item_id, ev.delta || '', false);
+      setBlockSource(ev.item_id, ev.delta || '', false, /*append*/ true);
       break;
     case 'conversation.item.input_audio_transcription.completed':
-      appendOutgoingSelf(ev.item_id, ev.transcript || '', true);
+      setBlockSource(ev.item_id, ev.transcript || '', true, /*append*/ false);
+      break;
+    case 'response.created':
+      if (ev.response?.id && room.lastUserItemId) {
+        room.responseToItem.set(ev.response.id, room.lastUserItemId);
+      }
       break;
     case 'response.text.delta':
       handleResponseDelta(ev.response_id, ev.delta || '', false);
@@ -532,46 +679,73 @@ function handleRealtimeEvent(ev) {
   }
 }
 
-function ensureOutgoingSelfLine(itemId) {
-  let row = room.outgoingLines.get(itemId);
-  if (!row) {
-    const el = document.createElement('div');
-    el.className = 'line interim';
-    $('outgoing').appendChild(el);
-    row = { el, text: '', done: false };
-    room.outgoingLines.set(itemId, row);
-  }
-  return row;
+function ensureOutgoingBlock(itemId) {
+  let blk = room.outgoingBlocks.get(itemId);
+  if (blk) return blk;
+  const container = document.createElement('div');
+  container.className = 'line outgoing-block';
+  const source = document.createElement('div');
+  source.className = 'source interim';
+  source.textContent = '…';
+  const translation = document.createElement('div');
+  translation.className = 'translation interim';
+  translation.textContent = '';
+  container.append(source, translation);
+  $('outgoing').appendChild(container);
+  blk = {
+    container, sourceEl: source, translationEl: translation,
+    sourceText: '', translationText: '',
+    sourceDone: false, translationDone: false,
+  };
+  room.outgoingBlocks.set(itemId, blk);
+  return blk;
 }
-function appendOutgoingSelf(itemId, deltaOrFull, done) {
-  const row = ensureOutgoingSelfLine(itemId);
-  if (done) { row.text = deltaOrFull; row.done = true; row.el.classList.remove('interim'); }
-  else { row.text += deltaOrFull; }
-  row.el.textContent = row.text || '…';
+
+function setBlockSource(itemId, payload, done, append) {
+  const blk = ensureOutgoingBlock(itemId);
+  if (done) {
+    blk.sourceText = payload;
+    blk.sourceDone = true;
+    blk.sourceEl.classList.remove('interim');
+  } else {
+    if (append) blk.sourceText += payload; else blk.sourceText = payload;
+  }
+  blk.sourceEl.textContent = blk.sourceText || '…';
+  scrollBottom($('outgoing'));
+}
+
+function setBlockTranslation(itemId, payload, done, append) {
+  const blk = ensureOutgoingBlock(itemId);
+  if (done) {
+    if (payload && payload.length > blk.translationText.length) blk.translationText = payload;
+    blk.translationDone = true;
+    blk.translationEl.classList.remove('interim');
+  } else {
+    if (append) blk.translationText += payload; else blk.translationText = payload;
+  }
+  blk.translationEl.textContent = blk.translationText;
   scrollBottom($('outgoing'));
 }
 
 function handleResponseDelta(responseId, delta, done, fullText) {
-  let row = room.outgoingResponses.get(responseId);
-  if (!row) {
-    row = { text: '', sentLen: 0, done: false };
-    room.outgoingResponses.set(responseId, row);
+  // 1. Show locally in our own outgoing pane (so speaker can verify translation).
+  const itemId = room.responseToItem.get(responseId) || room.lastUserItemId;
+  if (itemId) {
+    if (done) setBlockTranslation(itemId, fullText || '', true, false);
+    else setBlockTranslation(itemId, delta, false, true);
   }
-  if (done) {
-    if (fullText && fullText.length > row.text.length) row.text = fullText;
-    row.done = true;
-  } else {
-    row.text += delta;
-  }
+  // 2. Forward (incrementally) to peer over WS for them to render.
+  const fullSoFar = (room.outgoingBlocks.get(itemId)?.translationText) || (delta || fullText || '');
   if (room.ws && room.ws.readyState === 1) {
-    if (row.text.length > row.sentLen || done) {
+    const sentLen = room.responseSentLen.get(responseId) || 0;
+    if (fullSoFar.length > sentLen || done) {
       room.ws.send(JSON.stringify({
         type: 'subtitle',
         id: 'r_' + responseId,
-        text: row.text,
+        text: fullSoFar,
         final: !!done,
       }));
-      row.sentLen = row.text.length;
+      room.responseSentLen.set(responseId, fullSoFar.length);
     }
   }
 }
