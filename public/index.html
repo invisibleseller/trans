@@ -149,15 +149,17 @@
     </div>
   </header>
 
+  <div class="conv-toolbar">
+    <div class="mode-toggle" role="tablist" aria-label="显示模式">
+      <button type="button" class="mode-btn active" data-mode="bilingual" role="tab">双语对照</button>
+      <button type="button" class="mode-btn" data-mode="mine" role="tab">只看我的语言</button>
+      <button type="button" class="mode-btn" data-mode="peer" role="tab">只看对方语言</button>
+    </div>
+    <button type="button" id="exportBtn" class="btn small">导出对话</button>
+  </div>
+
   <main class="room-main">
-    <section class="pane primary-pane">
-      <header class="pane-head">对方说的（我的语言）</header>
-      <div id="incoming" class="lines big-lines" aria-live="polite"></div>
-    </section>
-    <section class="pane secondary-pane">
-      <header class="pane-head">我说的（原文 + 已发送译文）</header>
-      <div id="outgoing" class="lines" aria-live="polite"></div>
-    </section>
+    <div id="conversation" class="conversation mode-bilingual" aria-live="polite"></div>
   </main>
 </section>
 

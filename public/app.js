@@ -46,16 +46,19 @@ const room = {
   stream: null,
   audioBatch: [],
 
-  // Outgoing pane: each user item gets a block with [source] + [translation].
-  // userItemId -> { containerEl, sourceEl, translationEl, sourceText, translationText, sourceDone, translationDone }
-  outgoingBlocks: new Map(),
-  // Map responseId -> userItemId, to glue model translation back to user item.
-  responseToItem: new Map(),
-  // For chunks of text relayed to peer (don't include their full text every chunk).
-  responseSentLen: new Map(),
+  // Unified conversation, time-ordered. msgId -> entry.
+  // Entry: { speaker: 'me'|'peer', sourceText, sourceLang, sourceFinal,
+  //          translationText, translationLang, translationFinal,
+  //          containerEl, sourceEl, translationEl, ts }
+  messages: new Map(),
+  messageOrder: [],
+  // Map OpenAI responseId -> msgId so we can route the translation back
+  // onto the same user item.
+  responseToMsg: new Map(),
   lastUserItemId: null,
-  // Incoming pane: peer's translated speech in our language.
-  incomingLines: new Map(),
+
+  // Display mode for finalized messages: bilingual | mine | peer.
+  displayMode: localStorage.getItem('rti_display_mode') || 'bilingual',
 
   micEnabled: false,
 };
@@ -292,12 +295,10 @@ function setPeerLabel(language) {
   else { el.textContent = '对方说 ' + langByCode(language).name; el.classList.add('connected'); }
 }
 function resetRoomPanes() {
-  $('incoming').innerHTML = '';
-  $('outgoing').innerHTML = '';
-  room.outgoingBlocks.clear();
-  room.responseToItem.clear();
-  room.responseSentLen.clear();
-  room.incomingLines.clear();
+  $('conversation').innerHTML = '';
+  room.messages.clear();
+  room.messageOrder.length = 0;
+  room.responseToMsg.clear();
   room.lastUserItemId = null;
 }
 function updateQuotaUI() {
@@ -408,7 +409,7 @@ function handleServerMsg(msg) {
       stopMic();
       break;
     case 'peer_subtitle':
-      renderIncoming(msg.id, msg.text, msg.final);
+      applyPeerSubtitle(msg);
       break;
     case 'quota_update':
       room.remainingSeconds = Number(msg.remainingSeconds || 0);
@@ -610,25 +611,25 @@ function handleRealtimeEvent(ev) {
     case 'conversation.item.created':
       if (ev.item && ev.item.role === 'user') {
         room.lastUserItemId = ev.item.id;
-        ensureOutgoingBlock(ev.item.id);
+        ensureMessage(ev.item.id, 'me');
       }
       break;
     case 'conversation.item.input_audio_transcription.delta':
-      setBlockSource(ev.item_id, ev.delta || '', false, /*append*/ true);
+      updateOwnSource(ev.item_id, ev.delta || '', false, /*append*/ true);
       break;
     case 'conversation.item.input_audio_transcription.completed':
-      setBlockSource(ev.item_id, ev.transcript || '', true, /*append*/ false);
+      updateOwnSource(ev.item_id, ev.transcript || '', true, /*append*/ false);
       break;
     case 'response.created':
       if (ev.response?.id && room.lastUserItemId) {
-        room.responseToItem.set(ev.response.id, room.lastUserItemId);
+        room.responseToMsg.set(ev.response.id, room.lastUserItemId);
       }
       break;
     case 'response.text.delta':
-      handleResponseDelta(ev.response_id, ev.delta || '', false);
+      updateOwnTranslation(ev.response_id, ev.delta || '', false);
       break;
     case 'response.text.done':
-      handleResponseDelta(ev.response_id, '', true, ev.text || '');
+      updateOwnTranslation(ev.response_id, '', true, ev.text || '');
       break;
     case 'response.done':
       if (ev.response && ev.response.output) {
@@ -636,7 +637,7 @@ function handleRealtimeEvent(ev) {
           .flatMap((o) => o.content || [])
           .map((c) => c.text || c.transcript || '')
           .join('');
-        if (text) handleResponseDelta(ev.response.id, '', true, text);
+        if (text) updateOwnTranslation(ev.response.id, '', true, text);
       }
       break;
     case 'error':
@@ -646,91 +647,212 @@ function handleRealtimeEvent(ev) {
   }
 }
 
-function ensureOutgoingBlock(itemId) {
-  let blk = room.outgoingBlocks.get(itemId);
-  if (blk) return blk;
+// ---------- Unified conversation ----------
+
+function ensureMessage(msgId, speaker) {
+  let entry = room.messages.get(msgId);
+  if (entry) return entry;
+
   const container = document.createElement('div');
-  container.className = 'line outgoing-block';
-  const source = document.createElement('div');
-  source.className = 'source interim';
-  source.textContent = '…';
-  const translation = document.createElement('div');
-  translation.className = 'translation interim';
-  translation.textContent = '';
-  container.append(source, translation);
-  $('outgoing').appendChild(container);
-  blk = {
-    container, sourceEl: source, translationEl: translation,
-    sourceText: '', translationText: '',
-    sourceDone: false, translationDone: false,
+  container.className = 'msg msg-' + speaker;
+  container.dataset.speaker = speaker;
+  container.dataset.final = '0';
+
+  const head = document.createElement('div');
+  head.className = 'msg-head';
+  const whoEl = document.createElement('span');
+  whoEl.className = 'who';
+  whoEl.textContent = speaker === 'me' ? '你' : '对方';
+  head.appendChild(whoEl);
+
+  const sourceEl = document.createElement('div');
+  sourceEl.className = 'line source interim';
+  const translationEl = document.createElement('div');
+  translationEl.className = 'line translation interim';
+
+  // "my-lang" / "peer-lang" classes drive the display-mode CSS.
+  // For an outgoing message: source = my language, translation = peer language.
+  // For an incoming message: source = peer language, translation = my language.
+  if (speaker === 'me') {
+    sourceEl.classList.add('my-lang');
+    translationEl.classList.add('peer-lang');
+  } else {
+    sourceEl.classList.add('peer-lang');
+    translationEl.classList.add('my-lang');
+  }
+
+  container.append(head, sourceEl, translationEl);
+  $('conversation').appendChild(container);
+
+  entry = {
+    speaker,
+    sourceText: '', sourceLang: '', sourceFinal: false,
+    translationText: '', translationLang: '', translationFinal: false,
+    containerEl: container, sourceEl, translationEl,
+    ts: Date.now(),
   };
-  room.outgoingBlocks.set(itemId, blk);
-  return blk;
+  room.messages.set(msgId, entry);
+  room.messageOrder.push(msgId);
+  return entry;
 }
 
-function setBlockSource(itemId, payload, done, append) {
-  const blk = ensureOutgoingBlock(itemId);
+function refreshMessageDom(entry) {
+  entry.sourceEl.textContent = entry.sourceText || (entry.sourceFinal ? '' : '…');
+  entry.translationEl.textContent = entry.translationText || (entry.translationFinal ? '' : '…');
+  entry.sourceEl.classList.toggle('interim', !entry.sourceFinal);
+  entry.translationEl.classList.toggle('interim', !entry.translationFinal);
+  const bothFinal = entry.sourceFinal && entry.translationFinal;
+  entry.containerEl.dataset.final = bothFinal ? '1' : '0';
+  scrollBottom($('conversation'));
+}
+
+function updateOwnSource(itemId, payload, done, append) {
+  const entry = ensureMessage(itemId, 'me');
+  entry.sourceLang = room.myLanguage;
   if (done) {
-    blk.sourceText = payload;
-    blk.sourceDone = true;
-    blk.sourceEl.classList.remove('interim');
+    entry.sourceText = payload;
+    entry.sourceFinal = true;
+  } else if (append) {
+    entry.sourceText += payload;
   } else {
-    if (append) blk.sourceText += payload; else blk.sourceText = payload;
+    entry.sourceText = payload;
   }
-  blk.sourceEl.textContent = blk.sourceText || '…';
-  scrollBottom($('outgoing'));
+  refreshMessageDom(entry);
+  sendSubtitle(itemId, entry);
 }
 
-function setBlockTranslation(itemId, payload, done, append) {
-  const blk = ensureOutgoingBlock(itemId);
+function updateOwnTranslation(responseId, delta, done, fullText) {
+  const itemId = room.responseToMsg.get(responseId) || room.lastUserItemId;
+  if (!itemId) return;
+  const entry = ensureMessage(itemId, 'me');
+  entry.translationLang = room.peerLanguage || entry.translationLang;
   if (done) {
-    if (payload && payload.length > blk.translationText.length) blk.translationText = payload;
-    blk.translationDone = true;
-    blk.translationEl.classList.remove('interim');
-  } else {
-    if (append) blk.translationText += payload; else blk.translationText = payload;
-  }
-  blk.translationEl.textContent = blk.translationText;
-  scrollBottom($('outgoing'));
-}
-
-function handleResponseDelta(responseId, delta, done, fullText) {
-  // 1. Show locally in our own outgoing pane (so speaker can verify translation).
-  const itemId = room.responseToItem.get(responseId) || room.lastUserItemId;
-  if (itemId) {
-    if (done) setBlockTranslation(itemId, fullText || '', true, false);
-    else setBlockTranslation(itemId, delta, false, true);
-  }
-  // 2. Forward (incrementally) to peer over WS for them to render.
-  const fullSoFar = (room.outgoingBlocks.get(itemId)?.translationText) || (delta || fullText || '');
-  if (room.ws && room.ws.readyState === 1) {
-    const sentLen = room.responseSentLen.get(responseId) || 0;
-    if (fullSoFar.length > sentLen || done) {
-      room.ws.send(JSON.stringify({
-        type: 'subtitle',
-        id: 'r_' + responseId,
-        text: fullSoFar,
-        final: !!done,
-      }));
-      room.responseSentLen.set(responseId, fullSoFar.length);
+    if (fullText && fullText.length >= entry.translationText.length) {
+      entry.translationText = fullText;
     }
+    entry.translationFinal = true;
+  } else {
+    entry.translationText += delta;
   }
+  refreshMessageDom(entry);
+  sendSubtitle(itemId, entry);
 }
 
-function renderIncoming(id, text, final) {
-  let row = room.incomingLines.get(id);
-  if (!row) {
-    const el = document.createElement('div');
-    el.className = 'line interim';
-    $('incoming').appendChild(el);
-    row = { el };
-    room.incomingLines.set(id, row);
+function sendSubtitle(msgId, entry) {
+  if (!room.ws || room.ws.readyState !== 1) return;
+  room.ws.send(JSON.stringify({
+    type: 'subtitle',
+    msgId,
+    source: {
+      text: entry.sourceText,
+      lang: entry.sourceLang,
+      final: entry.sourceFinal,
+    },
+    translation: {
+      text: entry.translationText,
+      lang: entry.translationLang,
+      final: entry.translationFinal,
+    },
+  }));
+}
+
+function applyPeerSubtitle(msg) {
+  if (!msg.msgId) return;
+  const entry = ensureMessage(msg.msgId, 'peer');
+  // For an incoming message, source = peer's original (peer language),
+  // translation = peer's render-side translation into our language.
+  if (msg.source) {
+    entry.sourceText = msg.source.text || '';
+    entry.sourceLang = msg.source.lang || entry.sourceLang;
+    entry.sourceFinal = !!msg.source.final;
   }
-  row.el.textContent = text || '…';
-  if (final) row.el.classList.remove('interim');
-  scrollBottom($('incoming'));
+  if (msg.translation) {
+    entry.translationText = msg.translation.text || '';
+    entry.translationLang = msg.translation.lang || entry.translationLang;
+    entry.translationFinal = !!msg.translation.final;
+  }
+  refreshMessageDom(entry);
 }
 
 function scrollBottom(el) { el.scrollTop = el.scrollHeight; }
+
+// ---------- Display mode ----------
+
+function applyDisplayMode(mode) {
+  room.displayMode = mode;
+  localStorage.setItem('rti_display_mode', mode);
+  const conv = $('conversation');
+  conv.classList.remove('mode-bilingual', 'mode-mine', 'mode-peer');
+  conv.classList.add('mode-' + mode);
+  for (const btn of document.querySelectorAll('.mode-btn')) {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  }
+}
+
+document.querySelectorAll('.mode-btn').forEach((btn) => {
+  btn.addEventListener('click', () => applyDisplayMode(btn.dataset.mode));
+});
+applyDisplayMode(room.displayMode);
+
+// ---------- Export ----------
+
+function exportConversation() {
+  const langName = (code) => langByCode(code)?.name || code || '';
+  const rows = room.messageOrder.map((id) => {
+    const e = room.messages.get(id);
+    if (!e) return '';
+    const who = e.speaker === 'me' ? '你' : '对方';
+    const t = new Date(e.ts).toLocaleTimeString();
+    const src = escapeHtml(e.sourceText || '');
+    const tr  = escapeHtml(e.translationText || '');
+    const srcLang = langName(e.sourceLang);
+    const trLang  = langName(e.translationLang);
+    return `
+      <div class="m">
+        <div class="h"><b>${who}</b> <span class="t">${t}</span></div>
+        ${src ? `<div class="s"><span class="lab">${escapeHtml(srcLang)}</span>${src}</div>` : ''}
+        ${tr  ? `<div class="r"><span class="lab">${escapeHtml(trLang)}</span>${tr}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  const stamp = new Date().toLocaleString();
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>实时同传对话记录 ${stamp}</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Helvetica Neue",sans-serif;color:#111;background:#fff;margin:2rem;max-width:780px}
+  h1{font-size:1.2rem;margin:0 0 1rem}
+  .meta{color:#666;font-size:.85rem;margin-bottom:1.5rem}
+  .m{padding:.6rem 0;border-bottom:1px solid #eee}
+  .h{font-size:.85rem;color:#555;margin-bottom:.3rem}
+  .h .t{margin-left:.5rem;color:#999;font-weight:400}
+  .s,.r{margin:.15rem 0;line-height:1.5}
+  .s{color:#111}
+  .r{color:#0050a0}
+  .lab{display:inline-block;min-width:3.5em;font-size:.75rem;color:#888;margin-right:.5em}
+  @media print {
+    body{margin:1cm}
+    .m{break-inside:avoid}
+  }
+</style></head><body>
+<h1>实时同传对话记录</h1>
+<div class="meta">导出时间：${stamp}　·　共 ${room.messageOrder.length} 条</div>
+${rows || '<p style="color:#666">这次对话没有任何记录。</p>'}
+<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script>
+</body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { alert('浏览器拦截了弹窗，无法导出。请允许此站点弹窗后重试。'); return; }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;',
+  })[c]);
+}
+
+$('exportBtn').addEventListener('click', exportConversation);
 
 window.addEventListener('beforeunload', () => { leaveRoom(); });

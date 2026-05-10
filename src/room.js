@@ -176,12 +176,23 @@ export class Room extends DurableObject {
         case 'subtitle': {
           const other = this.otherPeer(wsId);
           if (!other) break;
+          // Bilingual relay: each subtitle carries both the speaker's source
+          // text (their language) and the translation (the listener's
+          // language). Either half may still be in-progress (final=false).
           try {
             other.ws.send(JSON.stringify({
               type: 'peer_subtitle',
-              id: msg.id,
-              text: typeof msg.text === 'string' ? msg.text : '',
-              final: !!msg.final,
+              msgId: typeof msg.msgId === 'string' ? msg.msgId : '',
+              source: msg.source && typeof msg.source === 'object' ? {
+                text: typeof msg.source.text === 'string' ? msg.source.text : '',
+                lang: typeof msg.source.lang === 'string' ? msg.source.lang : '',
+                final: !!msg.source.final,
+              } : null,
+              translation: msg.translation && typeof msg.translation === 'object' ? {
+                text: typeof msg.translation.text === 'string' ? msg.translation.text : '',
+                lang: typeof msg.translation.lang === 'string' ? msg.translation.lang : '',
+                final: !!msg.translation.final,
+              } : null,
             }));
           } catch {}
           break;
