@@ -1,25 +1,6 @@
 // SPA client. Hash routing for top-level views (#/, #/login, #/account).
 // Room session is in-memory only.
 
-// Wrap fetch so a stale or missing site-gate cookie bounces the user back to
-// /site-auth instead of crashing JSON.parse on a "gate_required" body.
-const _origFetch = window.fetch.bind(window);
-window.fetch = async function (...args) {
-  const resp = await _origFetch(...args);
-  if (resp.status === 401) {
-    const ct = resp.headers.get('content-type') || '';
-    if (!ct.includes('json')) {
-      const txt = await resp.clone().text();
-      if (txt.trim() === 'gate_required') {
-        const next = encodeURIComponent(location.pathname + location.search + location.hash);
-        location.href = '/site-auth?next=' + next;
-        throw new Error('gate_required');
-      }
-    }
-  }
-  return resp;
-};
-
 const LANGS = [
   { code: 'zh', name: '中文',     english: 'Chinese',  whisper: 'zh' },
   { code: 'en', name: 'English',  english: 'English',  whisper: 'en' },
@@ -132,14 +113,8 @@ fillLangSelect($('myLang'),     prefs.myLang);
   try {
     session.config = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
   } catch { session.config = {}; }
-  $('gateLogout').hidden = !session.config?.gateEnabled;
   applyHashRoute();
 })();
-
-$('gateLogout').onclick = async () => {
-  try { await fetch('/api/site-auth/logout', { method: 'POST' }); } catch {}
-  location.href = '/site-auth';
-};
 
 function fmtSeconds(s) {
   s = Number(s || 0);
@@ -254,20 +229,26 @@ $('redeemForm').addEventListener('submit', async (e) => {
 
 $('createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const password = $('createPwd').value;
-  const myLang   = $('createLang').value;
+  const sitePassword = $('createPwd').value;
+  const myLang       = $('createLang').value;
   $('createBtn').disabled = true;
   $('createErr').hidden = true;
   try {
     const resp = await fetch('/api/rooms', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ sitePassword }),
     });
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(data.error || 'create failed');
+    let data = null;
+    try { data = await resp.json(); } catch {}
+    if (!resp.ok) {
+      const code = data?.error;
+      const msg = code === 'bad_site_password' ? '创建密码错误'
+                : (code || '创建失败');
+      throw new Error(msg);
+    }
     localStorage.setItem('rti_my_lang', myLang);
-    enterRoom(data.roomId, password, myLang);
+    enterRoom(data.roomId, '', myLang);
   } catch (err) {
     showErr('createErr', err.message || String(err));
   } finally {
@@ -278,11 +259,10 @@ $('createForm').addEventListener('submit', async (e) => {
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const id = $('joinRoom').value.trim().toUpperCase();
-  const pwd = $('joinPwd').value;
   const myLang = $('joinLang').value;
   if (!id) return;
   localStorage.setItem('rti_my_lang', myLang);
-  enterRoom(id, pwd, myLang);
+  enterRoom(id, '', myLang);
 });
 
 function showErr(id, msg) { const el = $(id); el.textContent = msg; el.hidden = false; }

@@ -10,9 +10,7 @@
 
 <nav id="topnav">
   <a href="#/" class="brand">实时同传</a>
-  <div class="nav-right">
-    <button id="gateLogout" class="nav-link nav-btn" hidden>退出</button>
-  </div>
+  <div class="nav-right"></div>
 </nav>
 
 <!-- ============ HOME ============ -->
@@ -33,15 +31,15 @@
   <div class="card">
     <a href="#" class="back" data-back>← 返回</a>
     <h1>创建房间</h1>
-    <p class="lede">分享房间号给对方即可开始。</p>
+    <p class="lede">创建房间需要站长提供的创建密码。创建后把房间号发给对方，对方用房间号直接加入即可。</p>
     <form id="createForm">
       <label>
         我的语言（你说的语言）
         <select id="createLang"></select>
       </label>
       <label>
-        房间密码（可选）
-        <input id="createPwd" type="text" autocomplete="off" placeholder="留空则无密码">
+        创建密码
+        <input id="createPwd" type="password" autocomplete="off" placeholder="站长提供" required>
       </label>
       <div class="form-actions">
         <button class="btn primary" type="submit" id="createBtn">创建并进入</button>
@@ -56,6 +54,7 @@
   <div class="card">
     <a href="#" class="back" data-back>← 返回</a>
     <h1>加入房间</h1>
+    <p class="lede">输入对方告诉你的房间号即可加入。</p>
     <form id="joinForm">
       <label>
         房间号
@@ -64,10 +63,6 @@
       <label>
         我的语言（你说的语言）
         <select id="joinLang"></select>
-      </label>
-      <label>
-        房间密码
-        <input id="joinPwd" type="text" autocomplete="off" placeholder="若房间无密码则留空">
       </label>
       <div class="form-actions">
         <button class="btn primary" type="submit" id="joinBtn">加入</button>
