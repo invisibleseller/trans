@@ -142,6 +142,17 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   border-radius: 999px;
   background: var(--bg);
 }
+.quota {
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  font-variant-numeric: tabular-nums;
+}
+.quota.low { color: var(--warn); border-color: var(--warn); }
+.quota.empty { color: var(--err); border-color: var(--err); }
 .status.live { color: var(--ok); border-color: var(--ok); }
 .status.warn { color: var(--warn); border-color: var(--warn); }
 .status.err  { color: var(--err); border-color: var(--err); }

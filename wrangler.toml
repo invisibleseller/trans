@@ -1,7 +1,6 @@
 name = "realtime-interp"
 main = "src/index.js"
 compatibility_date = "2025-04-01"
-compatibility_flags = ["nodejs_compat"]
 
 [assets]
 directory = "./public"
@@ -14,3 +13,11 @@ class_name = "Room"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Room"]
+
+# Non-secret config. Override in dashboard or via wrangler.
+[vars]
+MODEL = "gpt-4o-realtime-preview"
+TRIAL_SECONDS = "30"
+
+# Required secret (set with `wrangler secret put OPENAI_API_KEY`):
+#   OPENAI_API_KEY = sk-...

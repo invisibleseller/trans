@@ -1,10 +1,11 @@
 // 1-to-1 realtime interpreter client.
 //
-// Architecture:
-//   - Browser <—WS—> Cloudflare Worker Durable Object (auth, ephemeral token, peer relay)
-//   - Browser <—WebRTC—> OpenAI Realtime API (mic in, translated text out)
-//   - My WebRTC session is configured to translate MY language into PEER's language.
-//     The translated text stream is forwarded over WS to the peer, who renders it.
+// Browser <—WS—> Cloudflare Worker:
+//   /api/rooms/:id/ws   room signaling, peer subtitle relay, quota updates
+//   /api/rooms/:id/oai  reverse proxy to OpenAI Realtime over WebSocket
+//
+// All audio leaves the browser as base64 PCM16 @ 24 kHz over the proxy WS.
+// No direct connection to api.openai.com is required from the browser.
 
 const LANGS = [
   { code: 'zh', name: '中文',     english: 'Chinese',  whisper: 'zh' },
@@ -15,12 +16,15 @@ const LANGS = [
   { code: 'fr', name: 'Français', english: 'French',   whisper: 'fr' },
 ];
 
+const SAMPLE_RATE = 24000;
+const BYTES_PER_SAMPLE = 2;
+const AUDIO_BATCH_FRAMES = 8;       // ~43 ms per outgoing chunk @ 24 kHz
+
 const $ = (id) => document.getElementById(id);
 const langByCode = (c) => LANGS.find((l) => l.code === c) || LANGS[0];
 
 const prefs = {
   myLang: localStorage.getItem('rti_my_lang') || 'zh',
-  model:  localStorage.getItem('rti_model')   || 'gpt-4o-realtime-preview',
 };
 
 const room = {
@@ -31,19 +35,25 @@ const room = {
   peerPresent: false,
   peerLanguage: null,
   myLanguage: prefs.myLang,
-  model: prefs.model,
-  ephemeral: null,
-  // WebRTC
-  pc: null,
-  dc: null,
+  model: null,
+  ticket: null,
+  trialSeconds: 30,
+  usedBytes: 0,
+
+  // Realtime proxy WS + audio pipeline
+  oai: null,
+  audioCtx: null,
+  audioSource: null,
+  audioNode: null,
   stream: null,
-  rtcReady: false,
-  // Rendering state
-  outgoingLines: new Map(), // userItemId -> { el, text, done }
-  outgoingResponses: new Map(), // responseId -> { el, text, sentLen, done }
-  incomingLines: new Map(), // remoteSubtitleId -> { el, text }
+  audioBatch: [],
+
+  // UI rendering state
+  outgoingLines: new Map(),       // userItemId -> { el, text, done }
+  outgoingResponses: new Map(),   // responseId -> { el, text, sentLen, done }
+  incomingLines: new Map(),       // subtitleId -> { el }
   lastUserItemId: null,
-  // Bookkeeping
+
   micEnabled: false,
 };
 
@@ -59,8 +69,6 @@ document.querySelectorAll('[data-back]').forEach((a) => {
 $('goCreate').onclick = () => showView('view-create');
 $('goJoin').onclick   = () => showView('view-join');
 
-// ---------- Populate language selects ----------
-
 function fillLangSelect(sel, current) {
   sel.innerHTML = '';
   for (const l of LANGS) {
@@ -74,32 +82,26 @@ fillLangSelect($('createLang'), prefs.myLang);
 fillLangSelect($('joinLang'),   prefs.myLang);
 fillLangSelect($('myLang'),     prefs.myLang);
 
-// ---------- Create / Join forms ----------
+// ---------- Create / Join ----------
 
 $('createForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const apiKey   = $('createKey').value.trim();
   const password = $('createPwd').value;
-  const model    = $('createModel').value.trim() || 'gpt-4o-realtime-preview';
   const myLang   = $('createLang').value;
-  if (!apiKey.startsWith('sk-')) {
-    showCreateErr('请提供以 sk- 开头的 OpenAI API key。');
-    return;
-  }
   $('createBtn').disabled = true;
+  $('createErr').hidden = true;
   try {
     const resp = await fetch('/api/rooms', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ apiKey, password, model }),
+      body: JSON.stringify({ password }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'create failed');
     localStorage.setItem('rti_my_lang', myLang);
-    localStorage.setItem('rti_model', model);
-    enterRoom(data.roomId, password, myLang, model);
+    enterRoom(data.roomId, password, myLang);
   } catch (err) {
-    showCreateErr(err.message || String(err));
+    showErr('createErr', err.message || String(err));
   } finally {
     $('createBtn').disabled = false;
   }
@@ -112,19 +114,17 @@ $('joinForm').addEventListener('submit', (e) => {
   const myLang = $('joinLang').value;
   if (!id) return;
   localStorage.setItem('rti_my_lang', myLang);
-  enterRoom(id, pwd, myLang, prefs.model);
+  enterRoom(id, pwd, myLang);
 });
 
-function showCreateErr(msg) { const el = $('createErr'); el.textContent = msg; el.hidden = false; }
-function showJoinErr(msg)   { const el = $('joinErr');   el.textContent = msg; el.hidden = false; }
+function showErr(id, msg) { const el = $(id); el.textContent = msg; el.hidden = false; }
 
 // ---------- Room view ----------
 
-function enterRoom(roomId, password, myLang, model) {
+function enterRoom(roomId, password, myLang) {
   room.id = roomId;
   room.password = password;
   room.myLanguage = myLang;
-  room.model = model;
   $('roomCode').textContent = roomId;
   $('myLang').value = myLang;
   setStatus('连接房间…');
@@ -139,18 +139,11 @@ function setStatus(text, cls = '') {
   el.textContent = text;
   el.className = 'status' + (cls ? ' ' + cls : '');
 }
-
 function setPeerLabel(language) {
   const el = $('peerLangLabel');
-  if (!language) {
-    el.textContent = '对方未到';
-    el.classList.remove('connected');
-  } else {
-    el.textContent = `对方说 ${langByCode(language).name}`;
-    el.classList.add('connected');
-  }
+  if (!language) { el.textContent = '对方未到'; el.classList.remove('connected'); }
+  else { el.textContent = '对方说 ' + langByCode(language).name; el.classList.add('connected'); }
 }
-
 function resetLines() {
   $('incoming').innerHTML = '';
   $('outgoing').innerHTML = '';
@@ -159,6 +152,16 @@ function resetLines() {
   room.incomingLines.clear();
   room.lastUserItemId = null;
 }
+function bytesToSeconds(b) { return b / (SAMPLE_RATE * BYTES_PER_SAMPLE); }
+function updateQuotaUI() {
+  const totalSec = room.trialSeconds;
+  const usedSec = bytesToSeconds(room.usedBytes);
+  const remaining = Math.max(0, totalSec - usedSec);
+  const el = $('quota');
+  el.textContent = `试用 ${remaining.toFixed(1)}s / ${totalSec}s`;
+  el.classList.toggle('low', remaining > 0 && remaining < 10);
+  el.classList.toggle('empty', remaining <= 0);
+}
 
 $('myLang').addEventListener('change', () => {
   room.myLanguage = $('myLang').value;
@@ -166,21 +169,21 @@ $('myLang').addEventListener('change', () => {
   if (room.ws && room.ws.readyState === 1) {
     room.ws.send(JSON.stringify({ type: 'set_language', language: room.myLanguage }));
   }
-  // Reconfigure the realtime session if active.
-  if (room.dc && room.dc.readyState === 'open') sendSessionUpdate();
+  if (room.oai && room.oai.readyState === 1) sendSessionUpdate();
 });
 
 $('copyRoom').onclick = async () => {
   try { await navigator.clipboard.writeText(room.id); setStatus('房间号已复制', 'live'); }
-  catch { /* ignore */ }
+  catch {}
 };
-
 $('leaveBtn').onclick = () => { leaveRoom(); showView('view-home'); };
-
 $('micBtn').onclick = async () => {
   if (room.micEnabled) { stopMic(); return; }
   if (!room.peerPresent) { setStatus('请等对方加入', 'warn'); return; }
-  if (!room.ephemeral) { setStatus('凭证未就绪', 'err'); return; }
+  if (bytesToSeconds(room.usedBytes) >= room.trialSeconds) {
+    setStatus('试用额度已用完', 'err');
+    return;
+  }
   try { await startMic(); }
   catch (err) {
     console.error(err);
@@ -189,7 +192,7 @@ $('micBtn').onclick = async () => {
   }
 };
 
-// ---------- WebSocket signaling ----------
+// ---------- Signaling WS ----------
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -223,22 +226,28 @@ function handleServerMsg(msg) {
       room.role = msg.role;
       room.peerPresent = !!msg.peerPresent;
       room.peerLanguage = msg.peerLanguage || null;
-      room.ephemeral = msg.ephemeral;
+      room.model = msg.model || room.model;
+      room.ticket = msg.ticket || null;
+      room.trialSeconds = Number(msg.trialSeconds || 30);
+      room.usedBytes = Number(msg.usedBytes || 0);
       setPeerLabel(room.peerLanguage);
       setStatus(room.peerPresent ? '已就绪' : '等待对方加入…', room.peerPresent ? 'live' : 'warn');
+      updateQuotaUI();
+      break;
+    case 'ticket':
+      room.ticket = msg.ticket;
       break;
     case 'peer_joined':
       room.peerPresent = true;
       room.peerLanguage = msg.language;
       setPeerLabel(room.peerLanguage);
       setStatus('已就绪', 'live');
-      // If mic is on, reconfigure session for the new peer language.
-      if (room.dc && room.dc.readyState === 'open') sendSessionUpdate();
+      if (room.oai && room.oai.readyState === 1) sendSessionUpdate();
       break;
     case 'peer_language':
       room.peerLanguage = msg.language;
       setPeerLabel(room.peerLanguage);
-      if (room.dc && room.dc.readyState === 'open') sendSessionUpdate();
+      if (room.oai && room.oai.readyState === 1) sendSessionUpdate();
       break;
     case 'peer_left':
       room.peerPresent = false;
@@ -250,18 +259,23 @@ function handleServerMsg(msg) {
     case 'peer_subtitle':
       renderIncoming(msg.id, msg.text, msg.final);
       break;
-    case 'ephemeral':
-      room.ephemeral = msg.ephemeral;
+    case 'quota_update':
+      room.usedBytes = Number(msg.usedBytes || room.usedBytes);
+      updateQuotaUI();
+      break;
+    case 'quota_exceeded':
+      room.usedBytes = Number(msg.usedBytes || room.usedBytes);
+      updateQuotaUI();
+      setStatus('试用额度已用完', 'err');
+      stopMic();
       break;
     case 'error':
       if (msg.error === 'bad_password') {
-        setStatus('密码错误', 'err');
-        showJoinErr('房间密码错误');
+        showErr('joinErr', '房间密码错误');
         leaveRoom();
         showView('view-join');
       } else if (msg.error === 'room_full') {
-        setStatus('房间已满', 'err');
-        showJoinErr('该房间已有两人在线');
+        showErr('joinErr', '该房间已有两人在线');
         leaveRoom();
         showView('view-join');
       } else {
@@ -277,10 +291,10 @@ function leaveRoom() {
   room.id = null;
   room.peerPresent = false;
   room.peerLanguage = null;
-  room.ephemeral = null;
+  room.ticket = null;
 }
 
-// ---------- Realtime / WebRTC ----------
+// ---------- Realtime over WS proxy + AudioWorklet ----------
 
 function buildInstructions() {
   const src = langByCode(room.myLanguage);
@@ -291,7 +305,7 @@ function buildInstructions() {
     `Translate every utterance into natural, idiomatic ${tgt.english}. ` +
     `Output ONLY the ${tgt.english} translation — no explanations, no source text, ` +
     `no quotation marks, no language labels. ` +
-    `Preserve the speaker's tone (casual stays casual, formal stays formal). ` +
+    `Preserve the speaker's tone. ` +
     `Begin emitting translation as soon as enough has been said; do not wait for the full sentence. ` +
     `Keep proper nouns and well-known technical terms in their conventional form.`
   );
@@ -302,6 +316,7 @@ function buildSessionConfig() {
   return {
     modalities: ['text'],
     instructions: buildInstructions(),
+    input_audio_format: 'pcm16',
     input_audio_transcription: { model: 'whisper-1', language: src.whisper },
     turn_detection: {
       type: 'server_vad',
@@ -315,72 +330,164 @@ function buildSessionConfig() {
 }
 
 function sendSessionUpdate() {
-  if (!room.dc || room.dc.readyState !== 'open') return;
-  room.dc.send(JSON.stringify({ type: 'session.update', session: buildSessionConfig() }));
+  room.oai.send(JSON.stringify({ type: 'session.update', session: buildSessionConfig() }));
+}
+
+async function ensureTicket() {
+  if (room.ticket) return;
+  await new Promise((resolve, reject) => {
+    let timer = setTimeout(() => reject(new Error('ticket timeout')), 3000);
+    const onMsg = (evt) => {
+      let m; try { m = JSON.parse(evt.data); } catch { return; }
+      if (m.type === 'ticket') {
+        room.ws.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+    room.ws.addEventListener('message', onMsg);
+    room.ws.send(JSON.stringify({ type: 'request_ticket' }));
+  });
 }
 
 async function startMic() {
   setStatus('请求麦克风…');
   room.stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
-
-  const pc = new RTCPeerConnection();
-  room.pc = pc;
-  pc.ontrack = () => {}; // text-only
-
-  pc.addTrack(room.stream.getAudioTracks()[0], room.stream);
-
-  const dc = pc.createDataChannel('oai-events');
-  room.dc = dc;
-  dc.addEventListener('open', () => {
-    sendSessionUpdate();
-    room.rtcReady = true;
-    setStatus('已连接 · 正在聆听', 'live');
-    room.micEnabled = true;
-    $('micBtn').textContent = '停止';
-    $('micBtn').classList.add('recording');
-    $('micBtn').classList.remove('primary');
-  });
-  dc.addEventListener('message', (e) => {
-    try { handleRealtimeEvent(JSON.parse(e.data)); } catch {}
-  });
-
-  pc.addEventListener('connectionstatechange', () => {
-    if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
-      if (room.pc === pc) stopMic();
-    }
-  });
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  setStatus('连接 OpenAI…');
-  const clientSecret = room.ephemeral?.client_secret?.value;
-  if (!clientSecret) throw new Error('missing ephemeral client secret');
-  const model = room.ephemeral?.model || room.model;
-  const resp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${clientSecret}`,
-      'Content-Type': 'application/sdp',
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      channelCount: 1,
+      sampleRate: SAMPLE_RATE,
     },
-    body: offer.sdp,
   });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(`OpenAI ${resp.status}: ${body.slice(0, 200)}`);
+
+  await ensureTicket();
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ticket = room.ticket;
+  room.ticket = null; // consumed
+  const oaiUrl = `${proto}//${location.host}/api/rooms/${encodeURIComponent(room.id)}/oai?ticket=${encodeURIComponent(ticket)}`;
+
+  setStatus('连接 Realtime…');
+  const oai = new WebSocket(oaiUrl);
+  oai.binaryType = 'arraybuffer';
+  room.oai = oai;
+
+  await new Promise((resolve, reject) => {
+    const onOpen = () => { oai.removeEventListener('open', onOpen); resolve(); };
+    const onErr = () => { reject(new Error('proxy ws failed')); };
+    oai.addEventListener('open', onOpen);
+    oai.addEventListener('error', onErr, { once: true });
+  });
+
+  sendSessionUpdate();
+
+  oai.addEventListener('message', (e) => {
+    if (typeof e.data !== 'string') return;
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    handleRealtimeEvent(ev);
+  });
+  oai.addEventListener('close', () => stopMic());
+
+  // Audio pipeline. AudioContext sample rate falls back to whatever the
+  // browser actually gives us; we resample if needed.
+  let ctx;
+  try {
+    ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  } catch {
+    ctx = new AudioContext();
   }
-  await pc.setRemoteDescription({ type: 'answer', sdp: await resp.text() });
+  room.audioCtx = ctx;
+  await ctx.audioWorklet.addModule('/pcm-worklet.js');
+  room.audioSource = ctx.createMediaStreamSource(room.stream);
+  room.audioNode = new AudioWorkletNode(ctx, 'pcm16');
+
+  const needResample = ctx.sampleRate !== SAMPLE_RATE;
+  const ratio = ctx.sampleRate / SAMPLE_RATE;
+  let resampleCarry = 0;
+
+  room.audioBatch = [];
+  let batchSamples = 0;
+
+  room.audioNode.port.onmessage = (e) => {
+    if (!room.oai || room.oai.readyState !== 1) return;
+
+    let samples = new Int16Array(e.data);
+    if (needResample) {
+      samples = downsampleInt16(samples, ratio, resampleCarryRef);
+    }
+
+    room.audioBatch.push(samples);
+    batchSamples += samples.length;
+
+    if (room.audioBatch.length >= AUDIO_BATCH_FRAMES) {
+      const merged = new Int16Array(batchSamples);
+      let off = 0;
+      for (const b of room.audioBatch) { merged.set(b, off); off += b.length; }
+      room.audioBatch = [];
+      batchSamples = 0;
+      try {
+        room.oai.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: base64FromInt16(merged),
+        }));
+      } catch {}
+    }
+  };
+
+  room.audioSource.connect(room.audioNode);
+  // Intentionally do not connect to ctx.destination — we don't want to hear
+  // our own voice routed back out.
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  room.micEnabled = true;
+  $('micBtn').textContent = '停止';
+  $('micBtn').classList.add('recording');
+  $('micBtn').classList.remove('primary');
+  setStatus('正在聆听', 'live');
+}
+
+const resampleCarryRef = { remainder: 0 };
+
+function downsampleInt16(input, ratio, carry) {
+  // Simple nearest-neighbor resample. Good enough for speech-to-text.
+  if (ratio === 1) return input;
+  const outLen = Math.floor((input.length - carry.remainder) / ratio);
+  if (outLen <= 0) {
+    carry.remainder -= input.length;
+    if (carry.remainder < 0) carry.remainder = 0;
+    return new Int16Array(0);
+  }
+  const out = new Int16Array(outLen);
+  let srcIdx = carry.remainder;
+  for (let i = 0; i < outLen; i++) {
+    out[i] = input[Math.floor(srcIdx)];
+    srcIdx += ratio;
+  }
+  carry.remainder = srcIdx - input.length;
+  if (carry.remainder < 0) carry.remainder = 0;
+  return out;
+}
+
+function base64FromInt16(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  let s = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(s);
 }
 
 function stopMic() {
-  room.rtcReady = false;
   room.micEnabled = false;
-  try { room.dc && room.dc.close(); } catch {}
-  try { room.pc && room.pc.close(); } catch {}
+  try { room.audioSource && room.audioSource.disconnect(); } catch {}
+  try { room.audioNode && room.audioNode.disconnect(); } catch {}
+  if (room.audioCtx) { try { room.audioCtx.close(); } catch {} }
   if (room.stream) room.stream.getTracks().forEach((t) => t.stop());
-  room.pc = room.dc = room.stream = null;
+  if (room.oai) { try { room.oai.close(); } catch {} }
+  room.audioCtx = room.audioSource = room.audioNode = room.stream = room.oai = null;
+  room.audioBatch = [];
   $('micBtn').textContent = '开始说话';
   $('micBtn').classList.remove('recording');
   $('micBtn').classList.add('primary');
@@ -397,23 +504,18 @@ function handleRealtimeEvent(ev) {
         ensureOutgoingSelfLine(ev.item.id);
       }
       break;
-
     case 'conversation.item.input_audio_transcription.delta':
       appendOutgoingSelf(ev.item_id, ev.delta || '', false);
       break;
-
     case 'conversation.item.input_audio_transcription.completed':
       appendOutgoingSelf(ev.item_id, ev.transcript || '', true);
       break;
-
     case 'response.text.delta':
       handleResponseDelta(ev.response_id, ev.delta || '', false);
       break;
-
     case 'response.text.done':
       handleResponseDelta(ev.response_id, '', true, ev.text || '');
       break;
-
     case 'response.done':
       if (ev.response && ev.response.output) {
         const text = ev.response.output
@@ -423,7 +525,6 @@ function handleRealtimeEvent(ev) {
         if (text) handleResponseDelta(ev.response.id, '', true, text);
       }
       break;
-
     case 'error':
       console.error('Realtime error', ev);
       setStatus('错误: ' + (ev.error?.message || 'unknown'), 'err');
@@ -431,7 +532,6 @@ function handleRealtimeEvent(ev) {
   }
 }
 
-// Render the user's own transcript (what I'm saying, in my language).
 function ensureOutgoingSelfLine(itemId) {
   let row = room.outgoingLines.get(itemId);
   if (!row) {
@@ -451,7 +551,6 @@ function appendOutgoingSelf(itemId, deltaOrFull, done) {
   scrollBottom($('outgoing'));
 }
 
-// Render the model's translation (what I'm sending out) and forward to peer.
 function handleResponseDelta(responseId, delta, done, fullText) {
   let row = room.outgoingResponses.get(responseId);
   if (!row) {
@@ -464,23 +563,19 @@ function handleResponseDelta(responseId, delta, done, fullText) {
   } else {
     row.text += delta;
   }
-  // Forward only new content to peer, as streaming subtitles.
   if (room.ws && room.ws.readyState === 1) {
     if (row.text.length > row.sentLen || done) {
-      const payload = {
+      room.ws.send(JSON.stringify({
         type: 'subtitle',
         id: 'r_' + responseId,
         text: row.text,
         final: !!done,
-      };
-      room.ws.send(JSON.stringify(payload));
+      }));
       row.sentLen = row.text.length;
     }
   }
-  scrollBottom($('outgoing'));
 }
 
-// Render incoming subtitles (peer speaking, in my language).
 function renderIncoming(id, text, final) {
   let row = room.incomingLines.get(id);
   if (!row) {
@@ -497,5 +592,4 @@ function renderIncoming(id, text, final) {
 
 function scrollBottom(el) { el.scrollTop = el.scrollHeight; }
 
-// Soft cleanup on tab close.
 window.addEventListener('beforeunload', () => { leaveRoom(); });
