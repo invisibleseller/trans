@@ -227,42 +227,41 @@ $('redeemForm').addEventListener('submit', async (e) => {
 
 // ---------- Create / Join room ----------
 
-$('createForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const sitePassword = $('createPwd').value;
-  const myLang       = $('createLang').value;
-  $('createBtn').disabled = true;
-  $('createErr').hidden = true;
+async function enterWithPassword(password, langSelId, errId, btnId) {
+  if (!password) return;
+  $(errId).hidden = true;
+  $(btnId).disabled = true;
   try {
     const resp = await fetch('/api/rooms', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sitePassword }),
+      body: JSON.stringify({ sitePassword: password }),
     });
     let data = null;
     try { data = await resp.json(); } catch {}
     if (!resp.ok) {
       const code = data?.error;
-      const msg = code === 'bad_site_password' ? '创建密码错误'
-                : (code || '创建失败');
+      const msg = code === 'bad_site_password' ? '密码错误' : (code || '失败');
       throw new Error(msg);
     }
+    const myLang = $(langSelId).value;
     localStorage.setItem('rti_my_lang', myLang);
     enterRoom(data.roomId, '', myLang);
   } catch (err) {
-    showErr('createErr', err.message || String(err));
+    showErr(errId, err.message || String(err));
   } finally {
-    $('createBtn').disabled = false;
+    $(btnId).disabled = false;
   }
+}
+
+$('createForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  enterWithPassword($('createPwd').value, 'createLang', 'createErr', 'createBtn');
 });
 
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  const id = $('joinRoom').value.trim().toUpperCase();
-  const myLang = $('joinLang').value;
-  if (!id) return;
-  localStorage.setItem('rti_my_lang', myLang);
-  enterRoom(id, '', myLang);
+  enterWithPassword($('joinRoom').value.trim(), 'joinLang', 'joinErr', 'joinBtn');
 });
 
 function showErr(id, msg) { const el = $(id); el.textContent = msg; el.hidden = false; }
