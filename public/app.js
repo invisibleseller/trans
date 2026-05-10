@@ -22,8 +22,7 @@ const prefs = {
 };
 
 const session = {
-  me: null,         // { authenticated, userId, email, balanceSeconds, ... }
-  config: null,     // { trialSeconds, loginMethods }
+  config: null,     // { trialSeconds, gateEnabled, ... }
 };
 
 const room = {
@@ -78,18 +77,12 @@ function showView(id) {
 function applyHashRoute() {
   // Room view is opened imperatively, not via hash.
   if ($('view-room').classList.contains('active') && location.hash.startsWith('#/')) {
-    // Leaving room view via nav click.
     leaveRoom();
   }
   const h = location.hash || '#/';
-  const v = VIEW_BY_HASH[h] || 'view-home';
-  if (v === 'view-account') {
-    if (!session.me?.authenticated) { location.hash = '#/login'; return; }
-    refreshAccount();
-  }
-  if (v === 'view-login' && session.me?.authenticated) {
-    location.hash = '#/account'; return;
-  }
+  // Account / login views are dormant in this build; bounce back home.
+  const v = (h === '#/login' || h === '#/account') ? 'view-home'
+          : (VIEW_BY_HASH[h] || 'view-home');
   showView(v);
 }
 
@@ -118,40 +111,16 @@ fillLangSelect($('myLang'),     prefs.myLang);
 
 (async function boot() {
   try {
-    const [cfg, me] = await Promise.all([
-      fetch('/api/config').then(r => r.json()).catch(() => ({})),
-      fetch('/api/me').then(r => r.json()).catch(() => ({ authenticated: false })),
-    ]);
-    session.config = cfg || {};
-    session.me = me || { authenticated: false };
-  } catch {
-    session.me = { authenticated: false };
-    session.config = {};
-  }
-  updateNav();
-  updateLoginButtons();
+    session.config = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
+  } catch { session.config = {}; }
+  $('gateLogout').hidden = !session.config?.gateEnabled;
   applyHashRoute();
 })();
 
-function updateNav() {
-  if (session.me?.authenticated) {
-    $('navLogin').hidden = true;
-    $('navAccount').hidden = false;
-    $('navBalance').hidden = false;
-    $('navBalance').textContent = '余额 ' + fmtSeconds(session.me.balanceSeconds);
-  } else {
-    $('navLogin').hidden = false;
-    $('navAccount').hidden = true;
-    $('navBalance').hidden = true;
-  }
-}
-
-function updateLoginButtons() {
-  const m = session.config?.loginMethods || {};
-  $('loginGoogle').hidden = !m.google;
-  $('loginWechat').hidden = !m.wechat;
-  $('oauthBlock').hidden = !(m.google || m.wechat);
-}
+$('gateLogout').onclick = async () => {
+  try { await fetch('/api/site-auth/logout', { method: 'POST' }); } catch {}
+  location.href = '/site-auth';
+};
 
 function fmtSeconds(s) {
   s = Number(s || 0);

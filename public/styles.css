@@ -48,6 +48,15 @@ body { display: flex; flex-direction: column; min-height: 100%; }
   text-decoration: none;
 }
 #topnav .nav-link:hover { color: var(--accent); }
+#topnav .nav-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  color: var(--fg-dim);
+}
+#topnav .nav-btn:hover { color: var(--accent); }
 #topnav .nav-balance {
   font-size: 0.82rem;
   color: var(--ok);

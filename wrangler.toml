@@ -25,10 +25,13 @@ database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
 
 [vars]
 MODEL = "gpt-4o-realtime-preview"
-TRIAL_SECONDS = "30"
+TRIAL_SECONDS = "60"
 
-# Required secret (Cloudflare dashboard → Settings → Variables, or):
+# Required secrets (Cloudflare dashboard → Settings → Variables, or):
 #   npx wrangler secret put OPENAI_API_KEY
+#   npx wrangler secret put SITE_PASSWORD  ← shared gate password. Tell each
+#                                            invited user this one string;
+#                                            without it the app is unreachable.
 #
 # Optional secrets — when set, these features light up:
 #   RESEND_API_KEY      enables real email sending for magic links
