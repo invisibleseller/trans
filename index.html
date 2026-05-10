@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实时同传</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>实时同传</h1>
+
+  <div class="lang-bar">
+    <label class="lang-group">
+      <span>源</span>
+      <select id="srcLang"></select>
+    </label>
+    <span class="arrow" aria-hidden="true">→</span>
+    <label class="lang-group">
+      <span>译</span>
+      <select id="tgtLang"></select>
+    </label>
+    <button id="swapBtn" class="btn icon" title="互换语言">⇄</button>
+  </div>
+
+  <div class="controls">
+    <span id="status" class="status">未连接</span>
+    <button id="clearBtn" class="btn" title="清空字幕">清空</button>
+    <button id="settingsBtn" class="btn" title="设置">设置</button>
+    <button id="micBtn" class="btn primary">开始</button>
+  </div>
+</header>
+
+<main>
+  <section class="pane">
+    <header class="pane-head" id="srcHead">源语言（识别）</header>
+    <div id="src" class="lines" aria-live="polite"></div>
+  </section>
+  <section class="pane">
+    <header class="pane-head" id="tgtHead">目标语言（译文）</header>
+    <div id="tgt" class="lines" aria-live="polite"></div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <form method="dialog" id="settingsForm">
+    <h2>设置</h2>
+    <label>
+      OpenAI API Key
+      <input id="apiKey" type="password" autocomplete="off" placeholder="sk-...">
+    </label>
+    <p class="hint">Key 仅保存在本机 localStorage，浏览器直连 OpenAI。建议使用受限权限的 key。</p>
+    <label>
+      Realtime 模型
+      <input id="model" type="text" placeholder="gpt-4o-realtime-preview">
+    </label>
+    <label>
+      附加风格提示（可选）
+      <textarea id="instructions" rows="3" placeholder="如：偏正式 / 偏口语 / 技术术语保留原文…"></textarea>
+    </label>
+    <menu>
+      <button type="button" id="cancelBtn" class="btn">取消</button>
+      <button type="submit" id="saveBtn" class="btn primary">保存</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
