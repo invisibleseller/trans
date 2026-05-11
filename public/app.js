@@ -941,15 +941,19 @@ $('exportBtn').addEventListener('click', exportConversation);
 const solo = {
   ws: null,
   ticket: null,
-  topLang: 'en',
-  bottomLang: 'zh',
-  active: null,     // which side is currently capturing audio ('top'|'bottom'|null)
+  myLang: 'zh',     // the device holder's language (what they speak / want to read)
+  peerLang: 'en',   // the other person's language
+
+  mode: 'speak',    // 'speak' | 'listen'
+  // speak sub-state: idle → recording → awaiting → ready → idle
+  // listen sub-state: idle → listening
+  subState: 'idle',
+  active: false,    // audio currently streaming to the WS?
 
   audioCtx: null, audioSource: null, audioNode: null, stream: null, audioBatch: [],
 
-  // Per-side state machine: idle → recording → awaiting → ready → idle
-  sideState: { top: 'idle', bottom: 'idle' },
-  sideMsgId: { top: null, bottom: null },
+  // Current speak-mode message (for the 🔊 send-to-peer step).
+  currentMsgId: null,
 
   lastUserItemId: null,
   responseToMsg: new Map(),
@@ -994,16 +998,15 @@ async function startSolo(sitePassword, mineLang, peerLang) {
   // chat-reply mode instead of translating.
   solo.ticket = data.ticket;
   solo.ws = null;
-  solo.topLang = peerLang;
-  solo.bottomLang = mineLang;
-  solo.active = null;
+  solo.myLang = mineLang;
+  solo.peerLang = peerLang;
+  solo.active = false;
+  solo.mode = 'speak';
+  solo.subState = 'idle';
   resetSoloState();
   await initSoloAudio();
 
-  $('soloTopLangName').textContent = langByCode(peerLang).name;
-  $('soloBottomLangName').textContent = langByCode(mineLang).name;
-  setSoloBig('Top', '点 🎙 让上方那位开始说话', false);
-  setSoloBig('Bottom', '点 🎙 开始说话', false);
+  applySoloMode();
   showView('view-solo');
 }
 
@@ -1051,7 +1054,7 @@ async function initSoloAudio() {
   if (ctx.state === 'suspended') await ctx.resume();
 }
 
-function sendSoloSession(srcLang, tgtLang) {
+function sendSoloSession(srcLang, tgtLang, manual) {
   if (!solo.ws || solo.ws.readyState !== 1) return;
   const src = langByCode(srcLang);
   const tgt = langByCode(tgtLang);
@@ -1060,8 +1063,15 @@ function sendSoloSession(srcLang, tgtLang) {
     `Translate the user's ${src.english} utterance into natural, idiomatic ${tgt.english}. ` +
     `Output ONLY the ${tgt.english} translation — no explanations, no source text, no labels. ` +
     `Preserve tone.`;
-  // turn_detection: null — manual control. The user clicks ⏹ to end a turn,
-  // which sends input_audio_buffer.commit + response.create.
+  // Manual (speak mode): user clicks ⏹ to commit. Auto (listen mode):
+  // server VAD segments continuous speech and auto-creates responses.
+  const turn_detection = manual ? null : {
+    type: 'server_vad',
+    threshold: 0.5,
+    prefix_padding_ms: 300,
+    silence_duration_ms: 600,
+    create_response: true,
+  };
   solo.ws.send(JSON.stringify({
     type: 'session.update',
     session: {
@@ -1069,65 +1079,182 @@ function sendSoloSession(srcLang, tgtLang) {
       instructions,
       input_audio_format: 'pcm16',
       input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
-      turn_detection: null,
+      turn_detection,
       temperature: 0.6,
     },
   }));
 }
 
-// Per-side button labels and visual state.
-function updateSoloButton(side) {
-  const btn = $(side === 'top' ? 'soloTopMic' : 'soloBottomMic');
+// ---------- Solo mode + sub-state UI ----------
+
+function applySoloMode() {
+  const view = $('view-solo');
+  view.classList.toggle('mode-listen', solo.mode === 'listen');
+  view.classList.toggle('mode-speak', solo.mode === 'speak');
+  const toggle = $('soloModeToggle');
+  if (toggle) toggle.textContent = solo.mode === 'speak' ? '👂 我要听' : '🗣 我要说';
+  updateSoloMainBtn();
+  updateSoloHint();
+}
+
+function updateSoloMainBtn() {
+  const btn = $('soloMainBtn');
   if (!btn) return;
-  const state = solo.sideState[side];
   btn.classList.remove('active', 'ready');
-  if (state === 'recording') {
-    btn.textContent = '⏹ 停止';
-    btn.classList.add('active');
-  } else if (state === 'awaiting') {
-    btn.textContent = '翻译中…';
-    btn.classList.add('active');
-  } else if (state === 'ready') {
-    btn.textContent = '🔊 发送给对方';
-    btn.classList.add('ready');
+  if (solo.mode === 'speak') {
+    if (solo.subState === 'recording') {
+      btn.textContent = '⏹ 停止';
+      btn.classList.add('active');
+    } else if (solo.subState === 'awaiting') {
+      btn.textContent = '翻译中…';
+      btn.classList.add('active');
+    } else if (solo.subState === 'ready') {
+      btn.textContent = '🔊 发送给对方';
+      btn.classList.add('ready');
+    } else {
+      btn.textContent = '🎙 开始说话';
+    }
+  } else { // listen
+    if (solo.subState === 'listening') {
+      btn.textContent = '⏸ 停止聆听';
+      btn.classList.add('active');
+    } else {
+      btn.textContent = '▶ 开始聆听';
+    }
+  }
+}
+
+function updateSoloHint() {
+  const hint = $('soloHint');
+  if (!hint) return;
+  const my = langByCode(solo.myLang)?.name || '';
+  const peer = langByCode(solo.peerLang)?.name || '';
+  if (solo.mode === 'speak') {
+    if (solo.subState === 'idle') hint.textContent = `按 🎙 说${my}，按 ⏹ 停下检查，按 🔊 让对方听${peer}`;
+    else if (solo.subState === 'recording') hint.textContent = `正在录音…说完后按 ⏹`;
+    else if (solo.subState === 'awaiting') hint.textContent = `等模型翻译…`;
+    else if (solo.subState === 'ready') hint.textContent = `检查无误后按 🔊 让对方听到`;
   } else {
-    btn.textContent = '🎙 开始说话';
+    hint.textContent = solo.subState === 'listening'
+      ? `请把手机麦克风冲向对方；对方说${peer}，下方实时显示${my}`
+      : `按 ▶ 开始聆听对方说${peer}`;
   }
 }
 
-async function onSoloMicClick(side) {
-  const state = solo.sideState[side];
-  if (state === 'idle') return startSoloRecording(side);
-  if (state === 'recording') return stopSoloRecording(side);
-  if (state === 'ready') return playSoloTranslation(side);
-  // 'awaiting' → no-op, user is waiting for translation
+async function onSoloMainClick() {
+  if (solo.mode === 'speak') {
+    if (solo.subState === 'idle') return startSoloRecording();
+    if (solo.subState === 'recording') return stopSoloRecording();
+    if (solo.subState === 'ready') return playSoloTranslation();
+  } else {
+    if (solo.subState === 'idle') return startSoloListening();
+    if (solo.subState === 'listening') return stopSoloListening();
+  }
 }
 
-async function startSoloRecording(side) {
-  if (!solo.ticket) return;
+function onSoloModeToggle() {
+  // Toggling cancels whatever's in flight in the current mode.
+  cancelSoloTurn();
+  solo.mode = solo.mode === 'speak' ? 'listen' : 'speak';
+  solo.subState = 'idle';
+  setSoloNow('', '', false, false);
+  applySoloMode();
+}
 
-  // If the other side is mid-flow, abandon it — only one direction at a time.
-  const other = side === 'top' ? 'bottom' : 'top';
-  if (solo.sideState[other] !== 'idle') {
-    solo.sideState[other] = 'idle';
-    updateSoloButton(other);
-  }
-
-  // Close any previous session WS — each turn gets a clean session.
-  if (solo.ws) {
-    try { solo.ws.close(); } catch {}
-    solo.ws = null;
-  }
-
-  // Reset in-flight tracking from a previous turn.
+function cancelSoloTurn() {
+  solo.active = false;
+  if (solo.ws) { try { solo.ws.close(); } catch {} solo.ws = null; }
+  solo.audioBatch = [];
   solo.lastUserItemId = null;
   solo.responseToMsg.clear();
-  solo.audioBatch = [];
+  solo.currentMsgId = null;
+}
 
-  // Optimistic UI — show recording state while the WS is dialing.
-  solo.sideState[side] = 'recording';
-  updateSoloButton(side);
+// ---------- Speak mode (turn-based, manual VAD) ----------
 
+async function startSoloRecording() {
+  if (!solo.ticket) return;
+  cancelSoloTurn();
+  solo.subState = 'recording';
+  updateSoloMainBtn();
+  updateSoloHint();
+  setSoloNow('', '', false, false);
+
+  if (!await openSoloWS()) return;
+  if (solo.subState !== 'recording') return;
+  sendSoloSession(solo.myLang, solo.peerLang, /*manual*/ true);
+  solo.active = true;
+}
+
+function stopSoloRecording() {
+  solo.active = false;
+  flushSoloAudioBatch();
+  if (solo.ws && solo.ws.readyState === 1) {
+    try {
+      solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+      solo.ws.send(JSON.stringify({ type: 'response.create' }));
+    } catch {}
+  }
+  solo.subState = 'awaiting';
+  updateSoloMainBtn();
+  updateSoloHint();
+}
+
+function playSoloTranslation() {
+  const entry = solo.currentMsgId ? solo.messages.get(solo.currentMsgId) : null;
+  const text = entry?.translationText || '';
+  const lang = entry?.translationLang || '';
+  const back = () => {
+    solo.subState = 'idle';
+    setSoloNow('', '', false, false);
+    updateSoloMainBtn();
+    updateSoloHint();
+  };
+  if (!text) { back(); return; }
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    if (lang) u.lang = lang;
+    u.onend = back;
+    u.onerror = back;
+    speechSynthesis.speak(u);
+  } catch {
+    back();
+  }
+}
+
+// ---------- Listen mode (continuous, server VAD auto-segments) ----------
+
+async function startSoloListening() {
+  if (!solo.ticket) return;
+  cancelSoloTurn();
+  solo.subState = 'listening';
+  updateSoloMainBtn();
+  updateSoloHint();
+  setSoloNow('', '', false, false);
+
+  if (!await openSoloWS()) return;
+  if (solo.subState !== 'listening') return;
+  // In listen mode the device holder is the *listener*; the speaker is the
+  // other person, so source = peerLang, target = myLang.
+  sendSoloSession(solo.peerLang, solo.myLang, /*manual*/ false);
+  solo.active = true;
+}
+
+function stopSoloListening() {
+  solo.active = false;
+  flushSoloAudioBatch();
+  // Don't force a final commit here — server VAD will close any in-flight
+  // utterance when audio stops, and we don't want a stray empty response.
+  if (solo.ws) { try { solo.ws.close(); } catch {} solo.ws = null; }
+  solo.subState = 'idle';
+  updateSoloMainBtn();
+  updateSoloHint();
+}
+
+// ---------- Shared helpers ----------
+
+async function openSoloWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = `${proto}//${location.host}/api/solo/oai?ticket=${encodeURIComponent(solo.ticket)}`;
   const ws = new WebSocket(url);
@@ -1139,93 +1266,50 @@ async function startSoloRecording(side) {
     handleSoloEvent(ev);
   });
   ws.addEventListener('close', () => { if (solo.ws === ws) solo.ws = null; });
-
   try {
     await new Promise((resolve, reject) => {
       ws.addEventListener('open', () => resolve(), { once: true });
       ws.addEventListener('error', () => reject(new Error('Realtime 连接失败')), { once: true });
       ws.addEventListener('close', () => reject(new Error('连接关闭')), { once: true });
     });
+    return solo.ws === ws;
   } catch (e) {
-    // User may have already moved on; only show the error if this WS is
-    // still the active one.
-    if (solo.ws !== ws) return;
+    if (solo.ws !== ws) return false;
     solo.ws = null;
-    solo.sideState[side] = 'idle';
-    updateSoloButton(side);
-    setSoloBig(side === 'top' ? 'Top' : 'Bottom', '连接失败：' + e.message, false);
-    return;
+    solo.subState = 'idle';
+    setSoloNow('连接失败：' + e.message, '', false, false);
+    updateSoloMainBtn();
+    updateSoloHint();
+    return false;
   }
-  if (solo.ws !== ws || solo.sideState[side] !== 'recording') return;
-
-  const srcLang = side === 'top' ? solo.topLang : solo.bottomLang;
-  const tgtLang = side === 'top' ? solo.bottomLang : solo.topLang;
-  sendSoloSession(srcLang, tgtLang);
-
-  // Audio worklet checks solo.active before sending — flip it on now.
-  solo.active = side;
 }
 
-function stopSoloRecording(side) {
-  // Stop capturing audio for this turn.
-  solo.active = null;
-
-  // Flush any leftover audio batch, then commit + create response.
-  if (solo.audioBatch.length && solo.ws && solo.ws.readyState === 1) {
-    let total = 0;
-    for (const b of solo.audioBatch) total += b.length;
-    const merged = new Int16Array(total);
-    let off = 0;
-    for (const b of solo.audioBatch) { merged.set(b, off); off += b.length; }
-    solo.audioBatch = [];
-    try {
-      solo.ws.send(JSON.stringify({
-        type: 'input_audio_buffer.append',
-        audio: base64FromInt16(merged),
-      }));
-    } catch {}
-  }
-  if (solo.ws && solo.ws.readyState === 1) {
-    try {
-      solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-      solo.ws.send(JSON.stringify({ type: 'response.create' }));
-    } catch {}
-  }
-
-  solo.sideState[side] = 'awaiting';
-  updateSoloButton(side);
-}
-
-function playSoloTranslation(side) {
-  const msgId = solo.sideMsgId[side];
-  const entry = msgId ? solo.messages.get(msgId) : null;
-  const text = entry?.translationText || '';
-  const lang = entry?.translationLang || '';
-  const finishIdle = () => {
-    solo.sideState[side] = 'idle';
-    updateSoloButton(side);
-  };
-  if (!text) { finishIdle(); return; }
+function flushSoloAudioBatch() {
+  if (!solo.audioBatch.length) return;
+  if (!solo.ws || solo.ws.readyState !== 1) { solo.audioBatch = []; return; }
+  let total = 0;
+  for (const b of solo.audioBatch) total += b.length;
+  const merged = new Int16Array(total);
+  let off = 0;
+  for (const b of solo.audioBatch) { merged.set(b, off); off += b.length; }
+  solo.audioBatch = [];
   try {
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    if (lang) u.lang = lang;
-    u.onend = finishIdle;
-    u.onerror = finishIdle;
-    speechSynthesis.speak(u);
-  } catch {
-    finishIdle();
-  }
+    solo.ws.send(JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: base64FromInt16(merged),
+    }));
+  } catch {}
 }
 
 function promoteSoloIfReady(msgId, entry) {
-  // Only once translation is finalized do we let the speaker tap to send.
+  // Speak mode only: tap-to-send is gated on translation done.
+  if (solo.mode !== 'speak') return;
   if (!entry.translationFinal) return;
-  const side = entry.speaker;
-  if (solo.sideState[side] !== 'awaiting') return;
-  solo.sideMsgId[side] = msgId;
-  solo.sideState[side] = 'ready';
-  updateSoloButton(side);
+  if (solo.subState !== 'awaiting') return;
+  solo.currentMsgId = msgId;
+  solo.subState = 'ready';
+  updateSoloMainBtn();
+  updateSoloHint();
 }
 
 function stopSoloAudio() {
@@ -1234,9 +1318,7 @@ function stopSoloAudio() {
   if (solo.audioCtx) { try { solo.audioCtx.close(); } catch {} }
   if (solo.stream) solo.stream.getTracks().forEach((t) => t.stop());
   solo.audioCtx = solo.audioSource = solo.audioNode = solo.stream = null;
-  solo.active = null;
-  $('soloTopMic')?.classList.remove('active');
-  $('soloBottomMic')?.classList.remove('active');
+  solo.active = false;
 }
 
 function leaveSolo() {
@@ -1251,19 +1333,16 @@ function resetSoloState() {
   solo.order.length = 0;
   solo.lastUserItemId = null;
   solo.responseToMsg.clear();
-  solo.sideState.top = 'idle';
-  solo.sideState.bottom = 'idle';
-  solo.sideMsgId.top = null;
-  solo.sideMsgId.bottom = null;
+  solo.currentMsgId = null;
+  solo.subState = 'idle';
   const h = $('soloHistory'); if (h) h.innerHTML = '';
-  setSoloBig('Top', '', false);
-  setSoloBig('Bottom', '', false);
-  updateSoloButton('top');
-  updateSoloButton('bottom');
+  setSoloNow('', '', false, false);
+  updateSoloMainBtn();
+  updateSoloHint();
 }
 
-$('soloTopMic').addEventListener('click', () => onSoloMicClick('top'));
-$('soloBottomMic').addEventListener('click', () => onSoloMicClick('bottom'));
+$('soloMainBtn').addEventListener('click', onSoloMainClick);
+$('soloModeToggle').addEventListener('click', onSoloModeToggle);
 $('soloLeave').addEventListener('click', leaveSolo);
 $('soloExport').addEventListener('click', exportSoloConversation);
 
@@ -1320,9 +1399,11 @@ function handleSoloEvent(ev) {
 function ensureSoloMsg(msgId) {
   let entry = solo.messages.get(msgId);
   if (entry) return entry;
-  const speaker = solo.active || 'bottom';
-  const srcLang = speaker === 'top' ? solo.topLang : solo.bottomLang;
-  const tgtLang = speaker === 'top' ? solo.bottomLang : solo.topLang;
+  // Speak mode: device holder is the speaker → speaker = 'me'.
+  // Listen mode: the other person is the speaker → speaker = 'peer'.
+  const speaker = solo.mode === 'speak' ? 'me' : 'peer';
+  const srcLang = speaker === 'me' ? solo.myLang : solo.peerLang;
+  const tgtLang = speaker === 'me' ? solo.peerLang : solo.myLang;
   entry = {
     speaker,
     sourceLang: srcLang, translationLang: tgtLang,
@@ -1340,7 +1421,7 @@ function updateSoloSource(msgId, payload, done, append) {
   if (done) { e.sourceText = payload; e.sourceFinal = true; }
   else if (append) e.sourceText += payload;
   else e.sourceText = payload;
-  paintSoloBig(e);
+  paintSoloNow(e);
   maybeArchiveSolo(msgId, e);
 }
 
@@ -1354,25 +1435,31 @@ function updateSoloTranslation(respId, delta, done, fullText) {
   } else {
     e.translationText += delta;
   }
-  paintSoloBig(e);
+  paintSoloNow(e);
   maybeArchiveSolo(msgId, e);
   if (e.translationFinal) promoteSoloIfReady(msgId, e);
 }
 
-function paintSoloBig(e) {
-  const topText = e.sourceLang === solo.topLang ? e.sourceText : e.translationText;
-  const topFinal = e.sourceLang === solo.topLang ? e.sourceFinal : e.translationFinal;
-  const bottomText = e.sourceLang === solo.bottomLang ? e.sourceText : e.translationText;
-  const bottomFinal = e.sourceLang === solo.bottomLang ? e.sourceFinal : e.translationFinal;
-  setSoloBig('Top', topText || (topFinal ? '' : '…'), !topFinal);
-  setSoloBig('Bottom', bottomText || (bottomFinal ? '' : '…'), !bottomFinal);
+function paintSoloNow(e) {
+  setSoloNow(
+    e.sourceText || (e.sourceFinal ? '' : '…'),
+    e.translationText || (e.translationFinal ? '' : '…'),
+    !e.sourceFinal,
+    !e.translationFinal,
+  );
 }
 
-function setSoloBig(which, text, interim) {
-  const el = $('solo' + which + 'Big');
-  if (!el) return;
-  el.textContent = text;
-  el.classList.toggle('interim', !!interim);
+function setSoloNow(sourceText, translationText, sourceInterim, translationInterim) {
+  const srcEl = $('soloNowSource');
+  const trEl = $('soloNowTranslation');
+  if (srcEl) {
+    srcEl.textContent = sourceText;
+    srcEl.classList.toggle('interim', !!sourceInterim);
+  }
+  if (trEl) {
+    trEl.textContent = translationText;
+    trEl.classList.toggle('interim', !!translationInterim);
+  }
 }
 
 function maybeArchiveSolo(msgId, e) {
@@ -1381,7 +1468,7 @@ function maybeArchiveSolo(msgId, e) {
   const li = document.createElement('div');
   li.className = 'h-msg';
   li.dataset.msgId = msgId;
-  const speakerLabel = e.speaker === 'top' ? '对方' : '你';
+  const speakerLabel = e.speaker === 'peer' ? '对方' : '你';
   li.innerHTML =
     `<span class="who">${speakerLabel}</span>` +
     `<span class="h-src">${escapeHtml(e.sourceText)}</span>` +
@@ -1405,7 +1492,7 @@ function exportSoloConversation() {
   const rows = solo.order.map((id) => {
     const e = solo.messages.get(id);
     if (!e) return '';
-    const who = e.speaker === 'top' ? '对方' : '你';
+    const who = e.speaker === 'peer' ? '对方' : '你';
     const t = new Date(e.ts).toLocaleTimeString();
     return `<div class="m"><div class="h"><b>${who}</b> <span class="t">${t}</span></div>
       <div class="s">${escapeHtml(e.sourceText)}</div>

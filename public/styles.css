@@ -286,7 +286,7 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
 .conversation.mode-mine .msg[data-final="1"] .peer-lang { display: none; }
 .conversation.mode-peer .msg[data-final="1"] .my-lang  { display: none; }
 
-/* ---------- Solo mode (single device, two people taking turns) ---------- */
+/* ---------- Solo mode (single device, one mode at a time) ---------- */
 
 #view-solo {
   padding: 0;
@@ -294,8 +294,15 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   height: 100vh;
   display: none;
   flex-direction: column;
+  /* Slow rotation so the user can see the screen flip when toggling modes. */
+  transition: transform 280ms ease;
+  transform-origin: center center;
 }
 #view-solo.active { display: flex; }
+/* In 听 (listen) mode the screen is flipped so the phone can lie microphone-
+   forward toward the other person while still being readable to the holder
+   when they pick it back up. */
+#view-solo.mode-listen { transform: rotate(180deg); }
 
 .solo-bar {
   position: absolute;
@@ -311,88 +318,98 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   backdrop-filter: blur(6px);
 }
 
-.solo-half {
+.solo-stage {
   flex: 1;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   align-items: center;
-  padding: 1.5rem 1.2rem;
-  text-align: center;
+  justify-content: flex-end;
+  padding: 1.2rem 1.2rem 2rem;
   min-height: 0;
-}
-.solo-top {
-  transform: rotate(180deg);
-  background: linear-gradient(180deg, rgba(88, 166, 255, 0.08), transparent);
-}
-.solo-bottom {
-  background: linear-gradient(0deg, rgba(63, 185, 80, 0.06), transparent);
-}
-.solo-head {
-  font-size: 0.85rem;
-  color: var(--fg-dim);
-  margin-bottom: 0.6rem;
-  letter-spacing: 0.04em;
-}
-.solo-head .solo-role { font-weight: 600; color: var(--fg); }
-.solo-big {
-  font-size: 1.7rem;
-  line-height: 1.4;
-  margin: 0 0 1rem;
-  min-height: 5rem;
-  max-width: 90%;
-  word-break: break-word;
-  color: var(--fg);
-}
-.solo-big.interim { color: var(--interim); }
-.solo-mic {
-  font-size: 1rem;
-  padding: 0.75rem 1.6rem;
-  border-radius: 999px;
-  min-width: 11rem;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  color: var(--fg);
-}
-.solo-mic.active {
-  background: var(--ok);
-  border-color: var(--ok);
-  color: #fff;
-}
-.solo-mic.ready {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.solo-history-wrap {
-  flex: 0 0 22vh;
-  min-height: 6rem;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-elev);
-  display: flex;
+  gap: 1rem;
 }
 .solo-history {
   flex: 1;
+  width: 100%;
+  max-width: 38rem;
   overflow-y: auto;
-  padding: 0.4rem 0.9rem;
-  font-size: 0.78rem;
-  line-height: 1.45;
+  padding: 1rem 0 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
   color: var(--fg-dim);
+  scroll-behavior: smooth;
+  /* Past lines fade into the top (visually further away). */
+  mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,1) 2rem);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,1) 2rem);
 }
 .solo-history .h-msg {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  padding: 0.2rem 0;
+  display: block;
+  padding: 0.3rem 0;
   border-bottom: 1px dashed rgba(255,255,255,0.05);
   cursor: pointer;
 }
 .solo-history .h-msg:hover { background: rgba(255,255,255,0.02); }
-.solo-history .h-msg .who { font-weight: 600; color: var(--fg); min-width: 2.5em; }
+.solo-history .h-msg .who { font-weight: 600; color: var(--fg); margin-right: 0.4rem; }
 .solo-history .h-msg .h-src { color: var(--fg); }
-.solo-history .h-msg .h-tr { color: var(--accent); }
+.solo-history .h-msg .h-tr { color: var(--accent); margin-left: 0.4rem; }
+
+.solo-now {
+  width: 100%;
+  max-width: 38rem;
+  text-align: center;
+  min-height: 6rem;
+}
+.solo-now-source {
+  font-size: 1.65rem;
+  line-height: 1.35;
+  color: var(--fg);
+  word-break: break-word;
+}
+.solo-now-source.interim { color: var(--interim); }
+.solo-now-translation {
+  margin-top: 0.45rem;
+  font-size: 1.05rem;
+  color: var(--accent);
+  word-break: break-word;
+}
+.solo-now-translation.interim { color: var(--accent-hi); opacity: 0.75; }
+/* In 听 mode the translation (= text in the listener's own language) is what
+   matters most; flip the visual weight. */
+#view-solo.mode-listen .solo-now-source {
+  font-size: 1.05rem;
+  color: var(--fg-dim);
+}
+#view-solo.mode-listen .solo-now-translation {
+  font-size: 1.85rem;
+  color: var(--fg);
+}
+
+.solo-hint {
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+  text-align: center;
+  margin: 0;
+}
+
+.solo-main-btn {
+  font-size: 1rem;
+  padding: 0.85rem 1.8rem;
+  border-radius: 999px;
+  min-width: 12rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.solo-main-btn.active {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+}
+.solo-main-btn.ready {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 
 /* Live mic level meter next to the 开始说话 / 停止 button.
    Always visible inside the room so the slot doesn't move when mic turns

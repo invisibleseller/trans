@@ -101,23 +101,20 @@
 </section>
 
 <!-- ============ SOLO RUNTIME ============ -->
-<section id="view-solo" class="view solo">
+<section id="view-solo" class="view solo mode-speak">
   <div class="solo-bar">
-    <button id="soloExport" class="btn small">导出对话</button>
+    <button id="soloModeToggle" class="btn small" type="button">👂 我要听</button>
+    <button id="soloExport" class="btn small">导出</button>
     <button id="soloLeave" class="btn small">结束</button>
   </div>
-  <div class="solo-half solo-top" id="soloTop">
-    <div class="solo-head"><span class="solo-role">对方</span> · <span id="soloTopLangName">—</span></div>
-    <div class="solo-big" id="soloTopBig">点麦克风开始</div>
-    <button id="soloTopMic" class="btn solo-mic" type="button">🎙 我说话</button>
-  </div>
-  <div class="solo-history-wrap">
-    <div id="soloHistory" class="solo-history" aria-live="polite"></div>
-  </div>
-  <div class="solo-half solo-bottom" id="soloBottom">
-    <button id="soloBottomMic" class="btn solo-mic" type="button">🎙 我说话</button>
-    <div class="solo-big" id="soloBottomBig">点麦克风开始</div>
-    <div class="solo-head"><span class="solo-role">你</span> · <span id="soloBottomLangName">—</span></div>
+  <div class="solo-stage">
+    <div class="solo-history" id="soloHistory" aria-live="polite"></div>
+    <div class="solo-now" id="soloNow">
+      <div class="solo-now-source" id="soloNowSource"></div>
+      <div class="solo-now-translation" id="soloNowTranslation"></div>
+    </div>
+    <div class="solo-hint" id="soloHint">点 🎙 开始说话，对面就能听到你的英文</div>
+    <button id="soloMainBtn" class="btn solo-main-btn" type="button">🎙 开始说话</button>
   </div>
 </section>
 
