@@ -317,6 +317,14 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   border-radius: 999px;
   backdrop-filter: blur(6px);
 }
+/* The 🔊 同步朗读 toggle is only meaningful in listen mode; hide it in speak. */
+.solo-bar .listen-only { display: none; }
+#view-solo.mode-listen .solo-bar .listen-only { display: inline-block; }
+.solo-bar .btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 
 .solo-stage {
   flex: 1;

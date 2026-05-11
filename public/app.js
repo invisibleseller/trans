@@ -950,6 +950,10 @@ const solo = {
   subState: 'idle',
   active: false,    // audio currently streaming to the WS?
 
+  // Listen-mode option: speak each finalized translation aloud via the
+  // browser's TTS so a headphone user hears live audio of the subtitle.
+  listenSpeak: localStorage.getItem('rti_solo_listen_speak') === '1',
+
   audioCtx: null, audioSource: null, audioNode: null, stream: null, audioBatch: [],
 
   // Current speak-mode message (for the 🔊 send-to-peer step).
@@ -1096,8 +1100,16 @@ function applySoloMode() {
   view.classList.toggle('mode-speak', solo.mode === 'speak');
   const toggle = $('soloModeToggle');
   if (toggle) toggle.textContent = solo.mode === 'speak' ? '👂 我要听' : '🗣 我要说';
+  updateSoloListenSpeakBtn();
   updateSoloMainBtn();
   updateSoloHint();
+}
+
+function updateSoloListenSpeakBtn() {
+  const btn = $('soloListenSpeak');
+  if (!btn) return;
+  btn.classList.toggle('active', !!solo.listenSpeak);
+  btn.textContent = solo.listenSpeak ? '🔊 朗读 开' : '🔊 同步朗读';
 }
 
 function updateSoloMainBtn() {
@@ -1348,6 +1360,16 @@ function resetSoloState() {
 
 $('soloMainBtn').addEventListener('click', onSoloMainClick);
 $('soloModeToggle').addEventListener('click', onSoloModeToggle);
+$('soloListenSpeak').addEventListener('click', () => {
+  solo.listenSpeak = !solo.listenSpeak;
+  localStorage.setItem('rti_solo_listen_speak', solo.listenSpeak ? '1' : '0');
+  updateSoloListenSpeakBtn();
+  // Turning off mid-utterance: drop the queued speech so the user isn't
+  // stuck listening to a backlog.
+  if (!solo.listenSpeak) {
+    try { speechSynthesis.cancel(); } catch {}
+  }
+});
 $('soloLeave').addEventListener('click', leaveSolo);
 $('soloExport').addEventListener('click', exportSoloConversation);
 
@@ -1442,7 +1464,26 @@ function updateSoloTranslation(respId, delta, done, fullText) {
   }
   paintSoloNow(e);
   maybeArchiveSolo(msgId, e);
-  if (e.translationFinal) promoteSoloIfReady(msgId, e);
+  if (e.translationFinal) {
+    promoteSoloIfReady(msgId, e);
+    maybeSpeakListenSubtitle(e);
+  }
+}
+
+function maybeSpeakListenSubtitle(entry) {
+  // Listen mode + 🔊 toggle on → speak the finalized translation through
+  // the browser's TTS so a headphone user hears it in real time.
+  if (solo.mode !== 'listen') return;
+  if (!solo.listenSpeak) return;
+  if (entry.speaker !== 'peer') return;
+  if (entry.spokenTts) return;
+  if (!entry.translationText) return;
+  entry.spokenTts = true;
+  try {
+    const u = new SpeechSynthesisUtterance(entry.translationText);
+    if (entry.translationLang) u.lang = entry.translationLang;
+    speechSynthesis.speak(u);
+  } catch {}
 }
 
 function paintSoloNow(e) {
