@@ -286,16 +286,29 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
 .conversation.mode-mine .msg[data-final="1"] .peer-lang { display: none; }
 .conversation.mode-peer .msg[data-final="1"] .my-lang  { display: none; }
 
-/* Live mic level meter next to the 开始说话 / 停止 button */
+/* Live mic level meter next to the 开始说话 / 停止 button.
+   Always visible inside the room so the slot doesn't move when mic turns
+   on; dimmed when inactive, full opacity + green bar when capturing. */
 .mic-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  opacity: 0.55;
+  transition: opacity 150ms;
+}
+.mic-level.active { opacity: 1; }
+.mic-icon { font-size: 0.9rem; line-height: 1; }
+.mic-level-track {
   display: inline-block;
-  width: 56px;
+  width: 64px;
   height: 8px;
   background: var(--border);
   border-radius: 4px;
   overflow: hidden;
-  vertical-align: middle;
-  margin: 0 0.25rem;
 }
 #micLevelBar {
   display: block;

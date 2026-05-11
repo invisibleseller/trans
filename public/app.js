@@ -601,7 +601,7 @@ function setMicLevel(pct) {
 }
 function showMicLevel(show) {
   const el = $('micLevel');
-  if (el) el.hidden = !show;
+  if (el) el.classList.toggle('active', !!show);
   if (!show) setMicLevel(0);
 }
 
