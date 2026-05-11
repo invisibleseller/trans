@@ -230,41 +230,52 @@ $('redeemForm').addEventListener('submit', async (e) => {
 
 // ---------- Create / Join room ----------
 
-async function enterWithPassword(password, langSelId, errId, btnId) {
-  if (!password) return;
-  $(errId).hidden = true;
-  $(btnId).disabled = true;
+// Create flow: prove you have the operator-only creation password,
+// then get back a fresh roomId (the share code).
+async function createRoom(sitePassword, myLang) {
+  if (!sitePassword) return;
+  $('createErr').hidden = true;
+  $('createBtn').disabled = true;
   try {
     const resp = await fetch('/api/rooms', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sitePassword: password }),
+      body: JSON.stringify({ sitePassword }),
     });
     let data = null;
     try { data = await resp.json(); } catch {}
     if (!resp.ok) {
       const code = data?.error;
-      const msg = code === 'bad_site_password' ? '密码错误' : (code || '失败');
+      const msg = code === 'bad_site_password' ? '创建密码错误' : (code || '创建失败');
       throw new Error(msg);
     }
-    const myLang = $(langSelId).value;
     localStorage.setItem('rti_my_lang', myLang);
     enterRoom(data.roomId, '', myLang);
   } catch (err) {
-    showErr(errId, err.message || String(err));
+    showErr('createErr', err.message || String(err));
   } finally {
-    $(btnId).disabled = false;
+    $('createBtn').disabled = false;
   }
+}
+
+// Join flow: no extra auth — just take the share code as-is and open
+// the room WS. If the room hasn't been created (or expired), the WS
+// will close before we ever get a "joined" message and we surface that.
+function joinRoom(roomCode, myLang) {
+  if (!roomCode) return;
+  $('joinErr').hidden = true;
+  localStorage.setItem('rti_my_lang', myLang);
+  enterRoom(roomCode.toUpperCase(), '', myLang);
 }
 
 $('createForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  enterWithPassword($('createPwd').value, 'createLang', 'createErr', 'createBtn');
+  createRoom($('createPwd').value, $('createLang').value);
 });
 
 $('joinForm').addEventListener('submit', (e) => {
   e.preventDefault();
-  enterWithPassword($('joinRoom').value.trim(), 'joinLang', 'joinErr', 'joinBtn');
+  joinRoom($('joinRoom').value.trim(), $('joinLang').value);
 });
 
 function showErr(id, msg) { const el = $(id); el.textContent = msg; el.hidden = false; }
@@ -347,6 +358,7 @@ function connectWS() {
   const url = `${proto}//${location.host}/api/rooms/${encodeURIComponent(room.id)}/ws`;
   const ws = new WebSocket(url);
   room.ws = ws;
+  room.authed = false;
   ws.onopen = () => {
     ws.send(JSON.stringify({
       type: 'auth',
@@ -361,6 +373,16 @@ function connectWS() {
   };
   ws.onclose = () => {
     if (!room.id) return;
+    if (!room.authed) {
+      // WS dropped before we ever joined → room doesn't exist or password
+      // was wrong. Bounce back to the join form with a clear message.
+      const code = room.id;
+      stopMic();
+      leaveRoom();
+      showView('view-join');
+      showErr('joinErr', '房间码无效或房间已过期：' + code);
+      return;
+    }
     setStatus('连接已断开', 'err');
     stopMic();
   };
@@ -370,6 +392,7 @@ function connectWS() {
 function handleServerMsg(msg) {
   switch (msg.type) {
     case 'joined':
+      room.authed = true;
       room.role = msg.role;
       room.peerPresent = !!msg.peerPresent;
       room.peerLanguage = msg.peerLanguage || null;

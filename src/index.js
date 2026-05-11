@@ -153,27 +153,29 @@ export default {
 
     if (url.pathname === '/api/rooms' && method === 'POST') {
       const body = await readJSON(request) || {};
-      // The password IS the room id. Same password ⇒ same room.
-      // SITE_PASSWORD is the operator-set value that gates OpenAI token use;
-      // in this MVP only that one value is accepted, so everyone meets in
-      // a single shared room. Future multi-room work can drop this check.
-      const pw = String(body.sitePassword || '');
-      if (env.SITE_PASSWORD && pw !== String(env.SITE_PASSWORD)) {
+      // Creating a room costs OpenAI tokens, so it requires SITE_PASSWORD
+      // (the operator-only key). The returned roomId is a freshly-generated
+      // share code — distinct from SITE_PASSWORD — that the creator hands
+      // to the other party. Joining the WS endpoints below is open to
+      // anyone who knows that roomId.
+      if (env.SITE_PASSWORD && String(body.sitePassword || '') !== String(env.SITE_PASSWORD)) {
         return json({ error: 'bad_site_password' }, 401);
       }
-      const roomId = pw || 'default';
-      const id = env.ROOM.idFromName(roomId);
-      const stub = env.ROOM.get(id);
-      const initResp = await stub.fetch('https://room/init', {
-        method: 'POST',
-        body: JSON.stringify({
-          roomId,
-          password: '',
-          model: env.MODEL || 'gpt-4o-realtime-preview',
-        }),
-      });
-      if (!initResp.ok) return json({ error: 'init_failed' }, 500);
-      return json({ roomId });
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const roomId = genRoomId();
+        const id = env.ROOM.idFromName(roomId);
+        const stub = env.ROOM.get(id);
+        const initResp = await stub.fetch('https://room/init', {
+          method: 'POST',
+          body: JSON.stringify({
+            roomId,
+            password: '',
+            model: env.MODEL || 'gpt-4o-realtime-preview',
+          }),
+        });
+        if (initResp.ok) return json({ roomId });
+      }
+      return json({ error: 'create_failed' }, 500);
     }
 
     const m = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]{4,12})\/(ws|oai)$/i);
