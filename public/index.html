@@ -21,6 +21,7 @@
     <div class="home-actions">
       <button class="btn primary big" id="goCreate">创建房间</button>
       <button class="btn big" id="goJoin">加入房间</button>
+      <button class="btn big" id="goSolo">单机使用</button>
     </div>
     <p class="footer-hint">基于 OpenAI Realtime。房间号 12 小时后自动失效。</p>
   </div>
@@ -71,6 +72,56 @@
     </form>
   </div>
 </section>
+
+<!-- ============ SOLO SETUP ============ -->
+<section id="view-solo-form" class="view">
+  <div class="card">
+    <a href="#" class="back" data-back>← 返回</a>
+    <h1>单机使用</h1>
+    <p class="lede">两个人共用一台设备。屏幕上下分屏，上半部分对着对面的人，整体翻转 180°。点哪一半的麦克风按钮，就是那一边的人在说话。</p>
+    <form id="soloForm">
+      <label>
+        我说的语言（下方，朝向你）
+        <select id="soloMineLang"></select>
+      </label>
+      <label>
+        对方说的语言（上方，朝向对面）
+        <select id="soloPeerLang"></select>
+      </label>
+      <label>
+        创建密码
+        <input id="soloPwd" type="password" autocomplete="off" placeholder="站长提供" required>
+      </label>
+      <div class="form-actions">
+        <button class="btn primary" type="submit" id="soloBtn">开始</button>
+      </div>
+      <p id="soloErr" class="err" hidden></p>
+    </form>
+  </div>
+</section>
+
+<!-- ============ SOLO RUNTIME ============ -->
+<section id="view-solo" class="view solo">
+  <div class="solo-bar">
+    <button id="soloExport" class="btn small">导出对话</button>
+    <button id="soloLeave" class="btn small">结束</button>
+  </div>
+  <div class="solo-half solo-top" id="soloTop">
+    <div class="solo-head"><span class="solo-role">对方</span> · <span id="soloTopLangName">—</span></div>
+    <div class="solo-big" id="soloTopBig">点麦克风开始</div>
+    <button id="soloTopMic" class="btn solo-mic" type="button">🎙 我说话</button>
+  </div>
+  <div class="solo-history-wrap">
+    <div id="soloHistory" class="solo-history" aria-live="polite"></div>
+  </div>
+  <div class="solo-half solo-bottom" id="soloBottom">
+    <button id="soloBottomMic" class="btn solo-mic" type="button">🎙 我说话</button>
+    <div class="solo-big" id="soloBottomBig">点麦克风开始</div>
+    <div class="solo-head"><span class="solo-role">你</span> · <span id="soloBottomLangName">—</span></div>
+  </div>
+</section>
+
+<!-- ============ EXPORT (post-call summary) ============ -->
 
 <!-- ============ LOGIN ============ -->
 <section id="view-login" class="view">

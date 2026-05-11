@@ -46,6 +46,110 @@ async function readJSON(request) {
   try { return await request.json(); } catch { return null; }
 }
 
+// ---------- Solo-mode helpers ----------
+// Solo mode skips the Room DO: a single browser proxies straight through
+// the Worker to OpenAI Realtime. We don't want the OPENAI key reachable
+// from anywhere on the open web, so /api/solo/oai requires a short-lived
+// HMAC ticket that you can only mint by knowing SITE_PASSWORD.
+
+const SOLO_TICKET_TTL_SECONDS = 300;
+
+function b64urlEncode(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(str) {
+  const pad = '==='.slice((str.length + 3) % 4);
+  const b64 = (str + pad).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(b64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+async function hmacKey(secret) {
+  return crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(String(secret || '')),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify'],
+  );
+}
+
+async function makeSoloTicket(env) {
+  const exp = Math.floor(Date.now() / 1000) + SOLO_TICKET_TTL_SECONDS;
+  const payload = 'solo|' + exp;
+  const key = await hmacKey(env.SITE_PASSWORD);
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  return exp + '.' + b64urlEncode(new Uint8Array(sig));
+}
+
+async function verifySoloTicket(env, ticket) {
+  try {
+    const [expStr, sigB64] = String(ticket || '').split('.');
+    const exp = Number(expStr);
+    if (!exp || exp < Math.floor(Date.now() / 1000)) return false;
+    const payload = 'solo|' + exp;
+    const key = await hmacKey(env.SITE_PASSWORD);
+    return await crypto.subtle.verify(
+      'HMAC', key, b64urlDecode(sigB64), new TextEncoder().encode(payload),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function proxySoloOpenAI(env) {
+  const apiKey = (env.OPENAI_API_KEY || '').trim();
+  if (!apiKey) return new Response('OPENAI_API_KEY not configured', { status: 500 });
+
+  const model = encodeURIComponent(env.MODEL || 'gpt-4o-realtime-preview');
+  const openaiUrl = 'https://api.openai.com/v1/realtime?model=' + model;
+
+  let upRes;
+  try {
+    upRes = await fetch(openaiUrl, {
+      headers: {
+        'Upgrade': 'websocket',
+        'Authorization': 'Bearer ' + apiKey,
+        'OpenAI-Beta': 'realtime=v1',
+      },
+    });
+  } catch (e) {
+    return new Response('upstream fetch failed: ' + (e?.message || e), { status: 502 });
+  }
+  const upstream = upRes.webSocket;
+  if (!upstream) {
+    let body = ''; try { body = await upRes.text(); } catch {}
+    return new Response('upstream did not upgrade (' + upRes.status + '): ' + body.slice(0, 200), { status: 502 });
+  }
+  upstream.accept();
+
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+
+  let closed = false;
+  const closeBoth = () => {
+    if (closed) return;
+    closed = true;
+    try { upstream.close(); } catch {}
+    try { server.close(); } catch {}
+  };
+
+  server.addEventListener('message', (e) => { if (!closed) try { upstream.send(e.data); } catch {} });
+  upstream.addEventListener('message', (e) => { if (!closed) try { server.send(e.data); } catch {} });
+  server.addEventListener('close', closeBoth);
+  upstream.addEventListener('close', closeBoth);
+  server.addEventListener('error', closeBoth);
+  upstream.addEventListener('error', closeBoth);
+
+  return new Response(null, { status: 101, webSocket: client });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -176,6 +280,27 @@ export default {
         if (initResp.ok) return json({ roomId });
       }
       return json({ error: 'create_failed' }, 500);
+    }
+
+    // ---------- Solo mode (single device, two people taking turns) ----------
+
+    if (url.pathname === '/api/solo' && method === 'POST') {
+      const body = await readJSON(request) || {};
+      if (env.SITE_PASSWORD && String(body.sitePassword || '') !== String(env.SITE_PASSWORD)) {
+        return json({ error: 'bad_site_password' }, 401);
+      }
+      const ticket = await makeSoloTicket(env);
+      return json({ ticket });
+    }
+
+    if (url.pathname === '/api/solo/oai') {
+      if (request.headers.get('Upgrade') !== 'websocket') {
+        return new Response('expected websocket', { status: 400 });
+      }
+      const ticket = url.searchParams.get('ticket') || '';
+      const ok = await verifySoloTicket(env, ticket);
+      if (!ok) return new Response('invalid ticket', { status: 401 });
+      return proxySoloOpenAI(env);
     }
 
     const m = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]{4,12})\/(ws|oai)$/i);

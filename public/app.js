@@ -934,4 +934,374 @@ function escapeHtml(s) {
 
 $('exportBtn').addEventListener('click', exportConversation);
 
+// ---------- Solo mode (single device, two people taking turns) ----------
+
+const solo = {
+  ws: null,
+  topLang: 'en',
+  bottomLang: 'zh',
+  active: null,     // 'top' | 'bottom' | null
+
+  audioCtx: null, audioSource: null, audioNode: null, stream: null, audioBatch: [],
+
+  lastUserItemId: null,
+  responseToMsg: new Map(),
+  messages: new Map(),
+  order: [],
+};
+
+fillLangSelect($('soloMineLang'), prefs.myLang);
+fillLangSelect($('soloPeerLang'), prefs.myLang === 'en' ? 'zh' : 'en');
+
+$('goSolo').onclick = () => { showView('view-solo-form'); };
+
+$('soloForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const sitePassword = $('soloPwd').value;
+  const mineLang = $('soloMineLang').value;
+  const peerLang = $('soloPeerLang').value;
+  if (mineLang === peerLang) { showErr('soloErr', '两边的语言不能相同'); return; }
+  $('soloErr').hidden = true;
+  $('soloBtn').disabled = true;
+  try { await startSolo(sitePassword, mineLang, peerLang); }
+  catch (err) { showErr('soloErr', err.message || String(err)); }
+  finally { $('soloBtn').disabled = false; }
+});
+
+async function startSolo(sitePassword, mineLang, peerLang) {
+  const resp = await fetch('/api/solo', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sitePassword }),
+  });
+  let data = null; try { data = await resp.json(); } catch {}
+  if (!resp.ok) {
+    throw new Error(data?.error === 'bad_site_password' ? '创建密码错误' : (data?.error || '失败'));
+  }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/api/solo/oai?ticket=${encodeURIComponent(data.ticket)}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', () => resolve(), { once: true });
+    ws.addEventListener('error', () => reject(new Error('Realtime 连接失败')), { once: true });
+  });
+  solo.ws = ws;
+  solo.topLang = peerLang;
+  solo.bottomLang = mineLang;
+  solo.active = null;
+  resetSoloState();
+
+  ws.addEventListener('message', (e) => {
+    if (typeof e.data !== 'string') return;
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    handleSoloEvent(ev);
+  });
+  ws.addEventListener('close', () => {
+    solo.ws = null;
+    stopSoloAudio();
+  });
+
+  await initSoloAudio();
+
+  $('soloTopLangName').textContent = langByCode(peerLang).name;
+  $('soloBottomLangName').textContent = langByCode(mineLang).name;
+  setSoloBig('Top', '点 🎙 让上方那位开始说话', false);
+  setSoloBig('Bottom', '点 🎙 开始说话', false);
+  showView('view-solo');
+}
+
+async function initSoloAudio() {
+  solo.stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      channelCount: 1, sampleRate: SAMPLE_RATE,
+    },
+  });
+  let ctx;
+  try { ctx = new AudioContext({ sampleRate: SAMPLE_RATE }); }
+  catch { ctx = new AudioContext(); }
+  solo.audioCtx = ctx;
+  await ctx.audioWorklet.addModule('/pcm-worklet.js');
+  solo.audioSource = ctx.createMediaStreamSource(solo.stream);
+  solo.audioNode = new AudioWorkletNode(ctx, 'pcm16');
+
+  const needResample = ctx.sampleRate !== SAMPLE_RATE;
+  const ratio = ctx.sampleRate / SAMPLE_RATE;
+  solo.audioBatch = [];
+  let batchSamples = 0;
+
+  solo.audioNode.port.onmessage = (e) => {
+    if (!solo.active || !solo.ws || solo.ws.readyState !== 1) return;
+    let samples = new Int16Array(e.data);
+    if (needResample) samples = downsampleInt16(samples, ratio);
+    solo.audioBatch.push(samples);
+    batchSamples += samples.length;
+    if (solo.audioBatch.length >= AUDIO_BATCH_FRAMES) {
+      const merged = new Int16Array(batchSamples);
+      let off = 0;
+      for (const b of solo.audioBatch) { merged.set(b, off); off += b.length; }
+      solo.audioBatch = [];
+      batchSamples = 0;
+      try {
+        solo.ws.send(JSON.stringify({
+          type: 'input_audio_buffer.append',
+          audio: base64FromInt16(merged),
+        }));
+      } catch {}
+    }
+  };
+  solo.audioSource.connect(solo.audioNode);
+  if (ctx.state === 'suspended') await ctx.resume();
+}
+
+function sendSoloSession(srcLang, tgtLang) {
+  if (!solo.ws || solo.ws.readyState !== 1) return;
+  const src = langByCode(srcLang);
+  const tgt = langByCode(tgtLang);
+  const instructions =
+    `You are a professional simultaneous interpreter. ` +
+    `The user speaks ${src.english}. ` +
+    `Translate every utterance into natural, idiomatic ${tgt.english}. ` +
+    `Output ONLY the ${tgt.english} translation — no explanations, no source text, no labels. ` +
+    `Preserve tone. Begin emitting as soon as enough has been said.`;
+  solo.ws.send(JSON.stringify({
+    type: 'session.update',
+    session: {
+      modalities: ['text'],
+      output_modalities: ['text'],
+      instructions,
+      input_audio_format: 'pcm16',
+      input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
+      turn_detection: {
+        type: 'server_vad',
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 600,
+        create_response: true,
+      },
+      temperature: 0.6,
+    },
+  }));
+}
+
+function activateSoloSide(side) {
+  if (!solo.ws) return;
+  if (solo.active === side) { deactivateSolo(); return; }
+  // Drop any buffered audio from a previous speaker so the new direction
+  // starts clean.
+  if (solo.ws && solo.ws.readyState === 1) {
+    try { solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+  }
+  solo.active = side;
+  const srcLang = side === 'top' ? solo.topLang : solo.bottomLang;
+  const tgtLang = side === 'top' ? solo.bottomLang : solo.topLang;
+  sendSoloSession(srcLang, tgtLang);
+  $('soloTopMic').classList.toggle('active', side === 'top');
+  $('soloBottomMic').classList.toggle('active', side === 'bottom');
+}
+
+function deactivateSolo() {
+  solo.active = null;
+  if (solo.ws && solo.ws.readyState === 1) {
+    try { solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); } catch {}
+  }
+  $('soloTopMic').classList.remove('active');
+  $('soloBottomMic').classList.remove('active');
+}
+
+function stopSoloAudio() {
+  try { solo.audioSource && solo.audioSource.disconnect(); } catch {}
+  try { solo.audioNode && solo.audioNode.disconnect(); } catch {}
+  if (solo.audioCtx) { try { solo.audioCtx.close(); } catch {} }
+  if (solo.stream) solo.stream.getTracks().forEach((t) => t.stop());
+  solo.audioCtx = solo.audioSource = solo.audioNode = solo.stream = null;
+  solo.active = null;
+  $('soloTopMic')?.classList.remove('active');
+  $('soloBottomMic')?.classList.remove('active');
+}
+
+function leaveSolo() {
+  if (solo.ws) { try { solo.ws.close(); } catch {} solo.ws = null; }
+  stopSoloAudio();
+  resetSoloState();
+  showView('view-home');
+}
+
+function resetSoloState() {
+  solo.messages.clear();
+  solo.order.length = 0;
+  solo.lastUserItemId = null;
+  solo.responseToMsg.clear();
+  const h = $('soloHistory'); if (h) h.innerHTML = '';
+  setSoloBig('Top', '', false);
+  setSoloBig('Bottom', '', false);
+}
+
+$('soloTopMic').addEventListener('click', () => activateSoloSide('top'));
+$('soloBottomMic').addEventListener('click', () => activateSoloSide('bottom'));
+$('soloLeave').addEventListener('click', leaveSolo);
+$('soloExport').addEventListener('click', exportSoloConversation);
+
+function handleSoloEvent(ev) {
+  switch (ev.type) {
+    case 'conversation.item.created':
+      if (ev.item && ev.item.role === 'user') {
+        solo.lastUserItemId = ev.item.id;
+        ensureSoloMsg(ev.item.id);
+      }
+      break;
+    case 'conversation.item.input_audio_transcription.delta':
+      updateSoloSource(ev.item_id, ev.delta || '', false, true);
+      break;
+    case 'conversation.item.input_audio_transcription.completed':
+      updateSoloSource(ev.item_id, ev.transcript || '', true, false);
+      break;
+    case 'response.created':
+      if (ev.response?.id && solo.lastUserItemId) {
+        solo.responseToMsg.set(ev.response.id, solo.lastUserItemId);
+      }
+      break;
+    case 'response.text.delta':
+    case 'response.output_text.delta':
+    case 'response.audio_transcript.delta':
+    case 'response.output_audio_transcript.delta':
+      updateSoloTranslation(ev.response_id, ev.delta || '', false);
+      break;
+    case 'response.text.done':
+    case 'response.output_text.done':
+      updateSoloTranslation(ev.response_id, '', true, ev.text || '');
+      break;
+    case 'response.audio_transcript.done':
+    case 'response.output_audio_transcript.done':
+      updateSoloTranslation(ev.response_id, '', true, ev.transcript || '');
+      break;
+    case 'response.done':
+      if (ev.response?.output) {
+        const text = ev.response.output.flatMap((o) => o.content || [])
+          .map((c) => c.text || c.transcript || '').join('');
+        if (text) updateSoloTranslation(ev.response.id, '', true, text);
+      }
+      break;
+    case 'error':
+      console.error('[solo realtime error]', ev);
+      break;
+    default:
+      if (ev.type && (ev.type.startsWith('response.') || ev.type.includes('error'))) {
+        console.debug('[solo realtime]', ev.type, ev);
+      }
+  }
+}
+
+function ensureSoloMsg(msgId) {
+  let entry = solo.messages.get(msgId);
+  if (entry) return entry;
+  const speaker = solo.active || 'bottom';
+  const srcLang = speaker === 'top' ? solo.topLang : solo.bottomLang;
+  const tgtLang = speaker === 'top' ? solo.bottomLang : solo.topLang;
+  entry = {
+    speaker,
+    sourceLang: srcLang, translationLang: tgtLang,
+    sourceText: '', translationText: '',
+    sourceFinal: false, translationFinal: false,
+    ts: Date.now(), historyEl: null,
+  };
+  solo.messages.set(msgId, entry);
+  solo.order.push(msgId);
+  return entry;
+}
+
+function updateSoloSource(msgId, payload, done, append) {
+  const e = ensureSoloMsg(msgId);
+  if (done) { e.sourceText = payload; e.sourceFinal = true; }
+  else if (append) e.sourceText += payload;
+  else e.sourceText = payload;
+  paintSoloBig(e);
+  maybeArchiveSolo(msgId, e);
+}
+
+function updateSoloTranslation(respId, delta, done, fullText) {
+  const msgId = solo.responseToMsg.get(respId) || solo.lastUserItemId;
+  if (!msgId) return;
+  const e = ensureSoloMsg(msgId);
+  if (done) {
+    if (fullText && fullText.length >= e.translationText.length) e.translationText = fullText;
+    e.translationFinal = true;
+  } else {
+    e.translationText += delta;
+  }
+  paintSoloBig(e);
+  maybeArchiveSolo(msgId, e);
+}
+
+function paintSoloBig(e) {
+  const topText = e.sourceLang === solo.topLang ? e.sourceText : e.translationText;
+  const topFinal = e.sourceLang === solo.topLang ? e.sourceFinal : e.translationFinal;
+  const bottomText = e.sourceLang === solo.bottomLang ? e.sourceText : e.translationText;
+  const bottomFinal = e.sourceLang === solo.bottomLang ? e.sourceFinal : e.translationFinal;
+  setSoloBig('Top', topText || (topFinal ? '' : '…'), !topFinal);
+  setSoloBig('Bottom', bottomText || (bottomFinal ? '' : '…'), !bottomFinal);
+}
+
+function setSoloBig(which, text, interim) {
+  const el = $('solo' + which + 'Big');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('interim', !!interim);
+}
+
+function maybeArchiveSolo(msgId, e) {
+  if (!e.sourceFinal || !e.translationFinal) return;
+  if (e.historyEl) return;
+  const li = document.createElement('div');
+  li.className = 'h-msg';
+  li.dataset.msgId = msgId;
+  const speakerLabel = e.speaker === 'top' ? '对方' : '你';
+  li.innerHTML =
+    `<span class="who">${speakerLabel}</span>` +
+    `<span class="h-src">${escapeHtml(e.sourceText)}</span>` +
+    `<span class="h-tr">${escapeHtml(e.translationText)}</span>`;
+  // Click any history row to replay the translation via the browser's TTS.
+  li.addEventListener('click', () => {
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(e.translationText);
+      u.lang = e.translationLang;
+      speechSynthesis.speak(u);
+    } catch {}
+  });
+  const list = $('soloHistory');
+  list.appendChild(li);
+  list.scrollTop = list.scrollHeight;
+  e.historyEl = li;
+}
+
+function exportSoloConversation() {
+  const rows = solo.order.map((id) => {
+    const e = solo.messages.get(id);
+    if (!e) return '';
+    const who = e.speaker === 'top' ? '对方' : '你';
+    const t = new Date(e.ts).toLocaleTimeString();
+    return `<div class="m"><div class="h"><b>${who}</b> <span class="t">${t}</span></div>
+      <div class="s">${escapeHtml(e.sourceText)}</div>
+      <div class="r">${escapeHtml(e.translationText)}</div></div>`;
+  }).join('');
+  const stamp = new Date().toLocaleString();
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>单机对话记录 ${stamp}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#111;max-width:780px;margin:2rem auto;padding:0 1rem}
+h1{font-size:1.2rem;margin:0 0 1rem}.meta{color:#666;font-size:.85rem;margin-bottom:1.5rem}
+.m{padding:.6rem 0;border-bottom:1px solid #eee}.h{font-size:.85rem;color:#555;margin-bottom:.3rem}
+.h .t{margin-left:.5rem;color:#999;font-weight:400}.s,.r{margin:.15rem 0;line-height:1.5}
+.s{color:#111}.r{color:#0050a0}@media print{body{margin:1cm}.m{break-inside:avoid}}
+</style></head><body><h1>单机翻译对话记录</h1>
+<div class="meta">导出时间：${stamp} · 共 ${solo.order.length} 条</div>
+${rows || '<p style="color:#666">这次对话没有任何记录。</p>'}
+<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  if (!w) { alert('浏览器拦截了弹窗，无法导出。请允许此站点弹窗后重试。'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
 window.addEventListener('beforeunload', () => { leaveRoom(); });

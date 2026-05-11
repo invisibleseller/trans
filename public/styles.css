@@ -286,6 +286,109 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
 .conversation.mode-mine .msg[data-final="1"] .peer-lang { display: none; }
 .conversation.mode-peer .msg[data-final="1"] .my-lang  { display: none; }
 
+/* ---------- Solo mode (single device, two people taking turns) ---------- */
+
+#view-solo {
+  padding: 0;
+  position: relative;
+  height: 100vh;
+  display: none;
+  flex-direction: column;
+}
+#view-solo.active { display: flex; }
+
+.solo-bar {
+  position: absolute;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.4rem;
+  z-index: 10;
+  background: rgba(13, 17, 23, 0.6);
+  padding: 0.25rem 0.4rem;
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+}
+
+.solo-half {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 1.5rem 1.2rem;
+  text-align: center;
+  min-height: 0;
+}
+.solo-top {
+  transform: rotate(180deg);
+  background: linear-gradient(180deg, rgba(88, 166, 255, 0.08), transparent);
+}
+.solo-bottom {
+  background: linear-gradient(0deg, rgba(63, 185, 80, 0.06), transparent);
+}
+.solo-head {
+  font-size: 0.85rem;
+  color: var(--fg-dim);
+  margin-bottom: 0.6rem;
+  letter-spacing: 0.04em;
+}
+.solo-head .solo-role { font-weight: 600; color: var(--fg); }
+.solo-big {
+  font-size: 1.7rem;
+  line-height: 1.4;
+  margin: 0 0 1rem;
+  min-height: 5rem;
+  max-width: 90%;
+  word-break: break-word;
+  color: var(--fg);
+}
+.solo-big.interim { color: var(--interim); }
+.solo-mic {
+  font-size: 1rem;
+  padding: 0.75rem 1.6rem;
+  border-radius: 999px;
+  min-width: 11rem;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--fg);
+}
+.solo-mic.active {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #fff;
+}
+
+.solo-history-wrap {
+  flex: 0 0 22vh;
+  min-height: 6rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+  display: flex;
+}
+.solo-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+.solo-history .h-msg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  border-bottom: 1px dashed rgba(255,255,255,0.05);
+  cursor: pointer;
+}
+.solo-history .h-msg:hover { background: rgba(255,255,255,0.02); }
+.solo-history .h-msg .who { font-weight: 600; color: var(--fg); min-width: 2.5em; }
+.solo-history .h-msg .h-src { color: var(--fg); }
+.solo-history .h-msg .h-tr { color: var(--accent); }
+
 /* Live mic level meter next to the 开始说话 / 停止 button.
    Always visible inside the room so the slot doesn't move when mic turns
    on; dimmed when inactive, full opacity + green bar when capturing. */
