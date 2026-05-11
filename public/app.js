@@ -938,6 +938,7 @@ $('exportBtn').addEventListener('click', exportConversation);
 
 const solo = {
   ws: null,
+  ticket: null,
   topLang: 'en',
   bottomLang: 'zh',
   active: null,     // 'top' | 'bottom' | null
@@ -978,30 +979,18 @@ async function startSolo(sitePassword, mineLang, peerLang) {
   if (!resp.ok) {
     throw new Error(data?.error === 'bad_site_password' ? '创建密码错误' : (data?.error || '失败'));
   }
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/api/solo/oai?ticket=${encodeURIComponent(data.ticket)}`;
-  const ws = new WebSocket(url);
-  ws.binaryType = 'arraybuffer';
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', () => resolve(), { once: true });
-    ws.addEventListener('error', () => reject(new Error('Realtime 连接失败')), { once: true });
-  });
-  solo.ws = ws;
+
+  // Cache the ticket and prep the audio pipeline, but do NOT open the
+  // OpenAI WS yet. A new WS is opened per side-switch in activateSoloSide
+  // so each speaker gets a fresh session with clean instructions and no
+  // accumulated conversation history — otherwise the model drifts into
+  // chat-reply mode instead of translating.
+  solo.ticket = data.ticket;
+  solo.ws = null;
   solo.topLang = peerLang;
   solo.bottomLang = mineLang;
   solo.active = null;
   resetSoloState();
-
-  ws.addEventListener('message', (e) => {
-    if (typeof e.data !== 'string') return;
-    let ev; try { ev = JSON.parse(e.data); } catch { return; }
-    handleSoloEvent(ev);
-  });
-  ws.addEventListener('close', () => {
-    solo.ws = null;
-    stopSoloAudio();
-  });
-
   await initSoloAudio();
 
   $('soloTopLangName').textContent = langByCode(peerLang).name;
@@ -1085,26 +1074,70 @@ function sendSoloSession(srcLang, tgtLang) {
   }));
 }
 
-function activateSoloSide(side) {
-  if (!solo.ws) return;
+async function activateSoloSide(side) {
+  if (!solo.ticket) return;
   if (solo.active === side) { deactivateSolo(); return; }
-  // Drop any buffered audio from a previous speaker so the new direction
-  // starts clean.
-  if (solo.ws && solo.ws.readyState === 1) {
-    try { solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.clear' })); } catch {}
+
+  // Close any previous session WS — every speaker turn gets a clean
+  // OpenAI session so the model stays in interpreter mode.
+  if (solo.ws) {
+    try { solo.ws.close(); } catch {}
+    solo.ws = null;
   }
+
+  // Visually mark the active side immediately so the user gets feedback
+  // even while the WS is dialing.
   solo.active = side;
+  $('soloTopMic').classList.toggle('active', side === 'top');
+  $('soloBottomMic').classList.toggle('active', side === 'bottom');
+
+  // Reset in-flight message tracking — the previous WS's response/item
+  // ids don't carry over.
+  solo.lastUserItemId = null;
+  solo.responseToMsg.clear();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/api/solo/oai?ticket=${encodeURIComponent(solo.ticket)}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  solo.ws = ws;
+  ws.addEventListener('message', (e) => {
+    if (typeof e.data !== 'string') return;
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    handleSoloEvent(ev);
+  });
+  ws.addEventListener('close', () => { if (solo.ws === ws) solo.ws = null; });
+
+  try {
+    await new Promise((resolve, reject) => {
+      ws.addEventListener('open', () => resolve(), { once: true });
+      ws.addEventListener('error', () => reject(new Error('Realtime 连接失败')), { once: true });
+      ws.addEventListener('close', () => reject(new Error('连接关闭')), { once: true });
+    });
+  } catch (e) {
+    // If the user clicked again to cancel while we were dialing, just bail.
+    if (solo.ws !== ws) return;
+    solo.ws = null;
+    solo.active = null;
+    $('soloTopMic').classList.remove('active');
+    $('soloBottomMic').classList.remove('active');
+    setSoloBig(side === 'top' ? 'Top' : 'Bottom', '连接失败：' + e.message, false);
+    return;
+  }
+
+  // Side may have changed (user clicked again while dialing).
+  if (solo.active !== side || solo.ws !== ws) return;
+
   const srcLang = side === 'top' ? solo.topLang : solo.bottomLang;
   const tgtLang = side === 'top' ? solo.bottomLang : solo.topLang;
   sendSoloSession(srcLang, tgtLang);
-  $('soloTopMic').classList.toggle('active', side === 'top');
-  $('soloBottomMic').classList.toggle('active', side === 'bottom');
 }
 
 function deactivateSolo() {
   solo.active = null;
-  if (solo.ws && solo.ws.readyState === 1) {
-    try { solo.ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); } catch {}
+  if (solo.ws) {
+    try { solo.ws.close(); } catch {}
+    solo.ws = null;
   }
   $('soloTopMic').classList.remove('active');
   $('soloBottomMic').classList.remove('active');

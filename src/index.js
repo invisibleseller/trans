@@ -52,7 +52,7 @@ async function readJSON(request) {
 // from anywhere on the open web, so /api/solo/oai requires a short-lived
 // HMAC ticket that you can only mint by knowing SITE_PASSWORD.
 
-const SOLO_TICKET_TTL_SECONDS = 300;
+const SOLO_TICKET_TTL_SECONDS = 3600;
 
 function b64urlEncode(bytes) {
   let s = '';
