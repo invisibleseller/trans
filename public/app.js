@@ -459,7 +459,11 @@ function buildInstructions() {
 function buildSessionConfig() {
   const src = langByCode(room.myLanguage);
   return {
+    // Newer Realtime sessions use output_modalities; older ones use
+    // modalities. Setting both is harmless and keeps text output across
+    // either schema version.
     modalities: ['text'],
+    output_modalities: ['text'],
     instructions: buildInstructions(),
     input_audio_format: 'pcm16',
     input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
@@ -661,11 +665,22 @@ function handleRealtimeEvent(ev) {
         room.responseToMsg.set(ev.response.id, room.lastUserItemId);
       }
       break;
+    // Translation deltas: depending on Realtime version + active modality
+    // the same content arrives under one of several event names. Treat them
+    // all as the model's translated text for the current response.
     case 'response.text.delta':
+    case 'response.output_text.delta':
+    case 'response.audio_transcript.delta':
+    case 'response.output_audio_transcript.delta':
       updateOwnTranslation(ev.response_id, ev.delta || '', false);
       break;
     case 'response.text.done':
+    case 'response.output_text.done':
       updateOwnTranslation(ev.response_id, '', true, ev.text || '');
+      break;
+    case 'response.audio_transcript.done':
+    case 'response.output_audio_transcript.done':
+      updateOwnTranslation(ev.response_id, '', true, ev.transcript || '');
       break;
     case 'response.done':
       if (ev.response && ev.response.output) {
@@ -678,7 +693,12 @@ function handleRealtimeEvent(ev) {
       break;
     case 'error':
       console.error('Realtime error', ev);
-      setStatus('错误: ' + (ev.error?.message || 'unknown'), 'err');
+      setStatus('错误: ' + (ev.error?.message || JSON.stringify(ev.error || {}) || 'unknown'), 'err');
+      break;
+    default:
+      if (ev.type && (ev.type.startsWith('response.') || ev.type.includes('error'))) {
+        console.debug('[realtime]', ev.type, ev);
+      }
       break;
   }
 }
