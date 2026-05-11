@@ -462,7 +462,7 @@ function buildSessionConfig() {
     modalities: ['text'],
     instructions: buildInstructions(),
     input_audio_format: 'pcm16',
-    input_audio_transcription: { model: 'whisper-1', language: src.whisper },
+    input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
     turn_detection: {
       type: 'server_vad',
       threshold: 0.5,
@@ -565,11 +565,44 @@ async function startMic() {
   room.audioSource.connect(room.audioNode);
   if (ctx.state === 'suspended') await ctx.resume();
 
+  // Live mic level — lets the user see whether their voice is actually
+  // being captured. If the bar never moves the OS / browser isn't routing
+  // audio to this tab, regardless of what "正在聆听" says.
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  analyser.smoothingTimeConstant = 0.3;
+  room.audioSource.connect(analyser);
+  room.audioAnalyser = analyser;
+  const levelBuf = new Uint8Array(analyser.fftSize);
+  showMicLevel(true);
+  const pollLevel = () => {
+    if (!room.audioAnalyser) return;
+    room.audioAnalyser.getByteTimeDomainData(levelBuf);
+    let max = 0;
+    for (let i = 0; i < levelBuf.length; i++) {
+      const d = Math.abs(levelBuf[i] - 128);
+      if (d > max) max = d;
+    }
+    setMicLevel(Math.min(100, Math.round((max * 100) / 64)));
+    requestAnimationFrame(pollLevel);
+  };
+  requestAnimationFrame(pollLevel);
+
   room.micEnabled = true;
   $('micBtn').textContent = '停止';
   $('micBtn').classList.add('recording');
   $('micBtn').classList.remove('primary');
   setStatus('正在聆听', 'live');
+}
+
+function setMicLevel(pct) {
+  const bar = $('micLevelBar');
+  if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+}
+function showMicLevel(show) {
+  const el = $('micLevel');
+  if (el) el.hidden = !show;
+  if (!show) setMicLevel(0);
 }
 
 function downsampleInt16(input, ratio) {
@@ -593,11 +626,14 @@ function stopMic() {
   room.micEnabled = false;
   try { room.audioSource && room.audioSource.disconnect(); } catch {}
   try { room.audioNode && room.audioNode.disconnect(); } catch {}
+  try { room.audioAnalyser && room.audioAnalyser.disconnect(); } catch {}
   if (room.audioCtx) { try { room.audioCtx.close(); } catch {} }
   if (room.stream) room.stream.getTracks().forEach((t) => t.stop());
   if (room.oai) { try { room.oai.close(); } catch {} }
   room.audioCtx = room.audioSource = room.audioNode = room.stream = room.oai = null;
+  room.audioAnalyser = null;
   room.audioBatch = [];
+  showMicLevel(false);
   $('micBtn').textContent = '开始说话';
   $('micBtn').classList.remove('recording');
   $('micBtn').classList.add('primary');
