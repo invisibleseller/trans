@@ -359,6 +359,11 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   border-color: var(--ok);
   color: #fff;
 }
+.solo-mic.ready {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 
 .solo-history-wrap {
   flex: 0 0 22vh;
