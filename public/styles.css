@@ -304,10 +304,12 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   transform-origin: center center;
 }
 #view-solo.active { display: flex; }
-/* Listen mode no longer rotates: the user (the listener) is the one
-   reading the screen, so it should sit upright in their hand. We keep
-   .mode-listen for the typography-weight swap below — translation is
-   what they need; the source line is small context. */
+/* Listen mode: the user holds the phone upside-down so the bottom-edge
+   microphone points at the other person across from them. We rotate
+   the whole view 180° so the screen reads upright from the user's
+   perspective even with the phone flipped.
+   (Speak mode keeps the screen upright with the phone held normally.) */
+#view-solo.mode-listen { transform: rotate(180deg); }
 
 .solo-bar {
   position: absolute;
