@@ -482,11 +482,13 @@ function buildInstructions() {
 function buildSessionConfig() {
   const src = langByCode(room.myLanguage);
   return {
-    // Newer Realtime sessions use output_modalities; older ones use
-    // modalities. Setting both is harmless and keeps text output across
-    // either schema version.
+    // gpt-4o-realtime-preview only knows the `modalities` key.
+    // Sending `output_modalities` causes the WHOLE session.update to
+    // be rejected, leaving the session on default (server_vad + audio +
+    // generic chat instructions), so the model replies in the caller's
+    // language instead of translating. Verified against the live API
+    // with /tmp/solo-e2e.mjs.
     modalities: ['text'],
-    output_modalities: ['text'],
     instructions: buildInstructions(),
     input_audio_format: 'pcm16',
     input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
@@ -1064,7 +1066,6 @@ function sendSoloSession(srcLang, tgtLang) {
     type: 'session.update',
     session: {
       modalities: ['text'],
-      output_modalities: ['text'],
       instructions,
       input_audio_format: 'pcm16',
       input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
