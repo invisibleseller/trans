@@ -299,10 +299,10 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   transform-origin: center center;
 }
 #view-solo.active { display: flex; }
-/* In 听 (listen) mode the screen is flipped so the phone can lie microphone-
-   forward toward the other person while still being readable to the holder
-   when they pick it back up. */
-#view-solo.mode-listen { transform: rotate(180deg); }
+/* Listen mode no longer rotates: the user (the listener) is the one
+   reading the screen, so it should sit upright in their hand. We keep
+   .mode-listen for the typography-weight swap below — translation is
+   what they need; the source line is small context. */
 
 .solo-bar {
   position: absolute;

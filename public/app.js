@@ -1001,7 +1001,10 @@ async function startSolo(sitePassword, mineLang, peerLang) {
   solo.myLang = mineLang;
   solo.peerLang = peerLang;
   solo.active = false;
-  solo.mode = 'speak';
+  // Default to listen — phone-out, listening to the other person is the
+  // primary scenario. The user picks up the phone and switches to speak
+  // when they need to reply.
+  solo.mode = 'listen';
   solo.subState = 'idle';
   resetSoloState();
   await initSoloAudio();
@@ -1204,11 +1207,13 @@ function playSoloTranslation() {
   const entry = solo.currentMsgId ? solo.messages.get(solo.currentMsgId) : null;
   const text = entry?.translationText || '';
   const lang = entry?.translationLang || '';
+  // After speaking, automatically return to listen mode — that's the
+  // default posture; speak was a brief detour.
   const back = () => {
     solo.subState = 'idle';
     setSoloNow('', '', false, false);
-    updateSoloMainBtn();
-    updateSoloHint();
+    solo.mode = 'listen';
+    applySoloMode();
   };
   if (!text) { back(); return; }
   try {
