@@ -1188,9 +1188,11 @@ function updateSoloHint() {
     else if (solo.subState === 'awaiting') hint.textContent = `等模型翻译…`;
     else if (solo.subState === 'ready') hint.textContent = `检查无误后按 🔊 让对方听到`;
   } else {
-    hint.textContent = solo.subState === 'listening'
-      ? `请把手机麦克风冲向对方；对方说${peer}，下方实时显示${my}`
-      : `按 ▶ 开始聆听对方说${peer}`;
+    if (solo.subState === 'listening') {
+      hint.textContent = `把手机倒过来拿，底部麦冲对方；对方说${peer}，屏幕实时显示${my}`;
+    } else {
+      hint.innerHTML = `按 ▶ 开始；把手机倒过来、底部麦冲对方。<br><span style="color:var(--err)">⚠ 不要戴有麦耳机</span>（AirPods 等会把输入切走、收不到对方）。要听同传请戴<b>无麦耳机</b>或开 🔊 同步朗读外放。`;
+    }
   }
 }
 
