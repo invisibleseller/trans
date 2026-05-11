@@ -22,6 +22,7 @@
       <button class="btn primary big" id="goCreate">创建房间</button>
       <button class="btn big" id="goJoin">加入房间</button>
       <button class="btn big" id="goSolo">单机使用</button>
+      <button class="btn big" id="goInterview">📻 双人采访</button>
     </div>
     <p class="footer-hint">基于 OpenAI Realtime。房间号 12 小时后自动失效。</p>
   </div>
@@ -118,7 +119,58 @@
   </div>
 </section>
 
-<!-- ============ EXPORT (post-call summary) ============ -->
+<!-- ============ INTERVIEW SETUP ============ -->
+<section id="view-interview-form" class="view">
+  <div class="card">
+    <a href="#" class="back" data-back>← 返回</a>
+    <h1>双人采访</h1>
+    <p class="lede">需要一支双发射器无线麦（DJI Mic / Rode Wireless GO II / Hollyland Lark M2 等），两人各夹一个发射器，接收器接到 iPhone / 电脑。**接收器要切到"双轨 / Discrete"模式**——左道一个人、右道另一个人。</p>
+    <form id="interviewForm">
+      <label>
+        左边的人说
+        <select id="ivLeftLang"></select>
+      </label>
+      <label>
+        右边的人说
+        <select id="ivRightLang"></select>
+      </label>
+      <label>
+        创建密码
+        <input id="ivPwd" type="password" autocomplete="off" placeholder="站长提供" required>
+      </label>
+      <div class="form-actions">
+        <button class="btn primary" type="submit" id="ivBtn">开始采访</button>
+      </div>
+      <p id="ivErr" class="err" hidden></p>
+    </form>
+  </div>
+</section>
+
+<!-- ============ INTERVIEW RUNTIME ============ -->
+<section id="view-interview" class="view interview">
+  <div class="iv-bar">
+    <span class="iv-status" id="ivStatus">采访中</span>
+    <button id="ivExport" class="btn small" type="button">导出</button>
+    <button id="ivLeave" class="btn small" type="button">结束</button>
+  </div>
+  <div class="iv-pane iv-pane-left">
+    <div class="iv-head"><span class="iv-side">左</span> · <span id="ivLeftLangName">—</span></div>
+    <div class="iv-now">
+      <div class="iv-source" id="ivLeftSource"></div>
+      <div class="iv-translation" id="ivLeftTranslation"></div>
+    </div>
+    <div class="iv-history" id="ivLeftHistory" aria-live="polite"></div>
+  </div>
+  <div class="iv-divider"></div>
+  <div class="iv-pane iv-pane-right">
+    <div class="iv-head"><span class="iv-side">右</span> · <span id="ivRightLangName">—</span></div>
+    <div class="iv-now">
+      <div class="iv-source" id="ivRightSource"></div>
+      <div class="iv-translation" id="ivRightTranslation"></div>
+    </div>
+    <div class="iv-history" id="ivRightHistory" aria-live="polite"></div>
+  </div>
+</section>
 
 <!-- ============ LOGIN ============ -->
 <section id="view-login" class="view">

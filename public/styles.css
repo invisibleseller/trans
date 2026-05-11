@@ -411,6 +411,114 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
   color: #fff;
 }
 
+/* ---------- Interview mode (single device, stereo wireless mic) ---------- */
+
+#view-interview {
+  padding: 0;
+  height: 100vh;
+  display: none;
+  flex-direction: column;
+}
+#view-interview.active { display: flex; }
+
+.iv-bar {
+  position: absolute;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  z-index: 10;
+  background: rgba(13, 17, 23, 0.7);
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  backdrop-filter: blur(6px);
+}
+.iv-status {
+  font-size: 0.78rem;
+  color: var(--ok);
+  letter-spacing: 0.04em;
+  padding-right: 0.4rem;
+  border-right: 1px solid var(--border);
+}
+.iv-status.err { color: var(--err); }
+
+#view-interview {
+  display: flex;
+  flex-direction: column;
+}
+#view-interview.active { display: flex; }
+
+.iv-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 2.6rem 1rem 1rem;
+  min-height: 0;
+  overflow: hidden;
+}
+.iv-pane-left  { background: linear-gradient(180deg, rgba(88, 166, 255, 0.06), transparent); }
+.iv-pane-right { background: linear-gradient(0deg, rgba(63, 185, 80, 0.05), transparent); }
+.iv-divider { height: 1px; background: var(--border); }
+
+.iv-head {
+  font-size: 0.78rem;
+  color: var(--fg-dim);
+  letter-spacing: 0.05em;
+  text-align: center;
+  margin-bottom: 0.4rem;
+}
+.iv-head .iv-side {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0.05em 0.4em;
+  border-radius: 4px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-weight: 600;
+  margin-right: 0.3rem;
+}
+.iv-now {
+  text-align: center;
+  margin: 0.3rem 0 0.6rem;
+}
+.iv-source {
+  font-size: 1.1rem;
+  color: var(--fg-dim);
+  line-height: 1.4;
+  word-break: break-word;
+  min-height: 1.5rem;
+}
+.iv-translation {
+  font-size: 1.55rem;
+  color: var(--fg);
+  line-height: 1.4;
+  word-break: break-word;
+  min-height: 2.5rem;
+}
+.iv-source.interim, .iv-translation.interim { color: var(--interim); }
+
+.iv-history {
+  flex: 1;
+  overflow-y: auto;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--fg-dim);
+  scroll-behavior: smooth;
+  mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,1) 2rem);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, rgba(0,0,0,1) 2rem);
+}
+.iv-history .h-row { padding: 0.25rem 0; border-bottom: 1px dashed rgba(255,255,255,0.05); }
+.iv-history .h-src { color: var(--fg-dim); }
+.iv-history .h-tr  { color: var(--accent); margin-left: 0.4rem; }
+
+/* On wider screens, lay the two panes side by side. */
+@media (min-width: 720px) and (orientation: landscape) {
+  #view-interview { flex-direction: row; }
+  .iv-divider { width: 1px; height: auto; }
+}
+
 /* Live mic level meter next to the 开始说话 / 停止 button.
    Always visible inside the room so the slot doesn't move when mic turns
    on; dimmed when inactive, full opacity + green bar when capturing. */

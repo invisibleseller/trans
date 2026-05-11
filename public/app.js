@@ -1516,4 +1516,382 @@ ${rows || '<p style="color:#666">这次对话没有任何记录。</p>'}
   w.document.open(); w.document.write(html); w.document.close();
 }
 
-window.addEventListener('beforeunload', () => { leaveRoom(); });
+// ---------- Interview mode (single device, stereo wireless mic) ----------
+
+const interview = {
+  ticket: null,
+  leftLang: 'zh',
+  rightLang: 'en',
+  audioCtx: null, stream: null, splitter: null,
+  leftWorklet: null, rightWorklet: null,
+  active: false,
+  lanes: {
+    left:  { ws: null, lastUserItemId: null, responseToMsg: new Map(),
+             messages: new Map(), order: [], audioBatch: [] },
+    right: { ws: null, lastUserItemId: null, responseToMsg: new Map(),
+             messages: new Map(), order: [], audioBatch: [] },
+  },
+};
+
+fillLangSelect($('ivLeftLang'), 'zh');
+fillLangSelect($('ivRightLang'), 'en');
+
+$('goInterview').onclick = () => { showView('view-interview-form'); };
+
+$('interviewForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const sitePassword = $('ivPwd').value;
+  const leftLang = $('ivLeftLang').value;
+  const rightLang = $('ivRightLang').value;
+  if (leftLang === rightLang) { showErr('ivErr', '两边的语言不能相同'); return; }
+  $('ivErr').hidden = true;
+  $('ivBtn').disabled = true;
+  try { await startInterview(sitePassword, leftLang, rightLang); }
+  catch (err) { showErr('ivErr', err.message || String(err)); }
+  finally { $('ivBtn').disabled = false; }
+});
+
+async function startInterview(sitePassword, leftLang, rightLang) {
+  // 1. Exchange password for ticket.
+  const resp = await fetch('/api/solo', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sitePassword }),
+  });
+  let data = null; try { data = await resp.json(); } catch {}
+  if (!resp.ok) {
+    throw new Error(data?.error === 'bad_site_password' ? '创建密码错误' : (data?.error || '失败'));
+  }
+  interview.ticket = data.ticket;
+  interview.leftLang = leftLang;
+  interview.rightLang = rightLang;
+
+  // 2. Open the mic in stereo. We need raw channels — disable AEC / NS /
+  //    AGC, which on most browsers would downmix to mono internally.
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: { ideal: 2 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: SAMPLE_RATE,
+      },
+    });
+  } catch (err) {
+    throw new Error('无法访问麦克风：' + (err.message || err));
+  }
+  interview.stream = stream;
+  const track = stream.getAudioTracks()[0];
+  const settings = track.getSettings();
+  const channelCount = settings.channelCount || 1;
+  if (channelCount < 2) {
+    cleanupInterviewAudio();
+    throw new Error(
+      '当前麦克风只有 1 个声道（' + (track.label || '默认输入') + '）。' +
+      '请连接双发射器无线麦的接收器，并把它设为双轨 / Discrete 输出。'
+    );
+  }
+
+  // 3. Split stereo input into two mono PCM streams via two AudioWorklets.
+  let ctx;
+  try { ctx = new AudioContext({ sampleRate: SAMPLE_RATE }); }
+  catch { ctx = new AudioContext(); }
+  interview.audioCtx = ctx;
+  await ctx.audioWorklet.addModule('/pcm-worklet.js');
+  const source = ctx.createMediaStreamSource(stream);
+  const splitter = ctx.createChannelSplitter(2);
+  source.connect(splitter);
+  interview.splitter = splitter;
+
+  const needResample = ctx.sampleRate !== SAMPLE_RATE;
+  const ratio = ctx.sampleRate / SAMPLE_RATE;
+
+  const makeWorklet = (channelIdx, side) => {
+    const node = new AudioWorkletNode(ctx, 'pcm16', {
+      numberOfInputs: 1, numberOfOutputs: 0,
+      channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'discrete',
+    });
+    splitter.connect(node, channelIdx);
+    node.port.onmessage = (e) => onInterviewPcm(side, e.data, needResample, ratio);
+    return node;
+  };
+  interview.leftWorklet  = makeWorklet(0, 'left');
+  interview.rightWorklet = makeWorklet(1, 'right');
+
+  // 4. Open both Realtime lanes — server VAD on both for continuous flow.
+  await Promise.all([
+    openInterviewLane('left',  leftLang,  rightLang),
+    openInterviewLane('right', rightLang, leftLang),
+  ]);
+
+  if (ctx.state === 'suspended') await ctx.resume();
+  interview.active = true;
+
+  $('ivLeftLangName').textContent  = langByCode(leftLang).name;
+  $('ivRightLangName').textContent = langByCode(rightLang).name;
+  setIvNow('left',  '', '', false, false);
+  setIvNow('right', '', '', false, false);
+  $('ivLeftHistory').innerHTML = '';
+  $('ivRightHistory').innerHTML = '';
+  setIvStatus('采访中', '');
+  showView('view-interview');
+}
+
+function onInterviewPcm(side, buf, needResample, ratio) {
+  const lane = interview.lanes[side];
+  if (!interview.active || !lane.ws || lane.ws.readyState !== 1) return;
+  let samples = new Int16Array(buf);
+  if (needResample) samples = downsampleInt16(samples, ratio);
+  lane.audioBatch.push(samples);
+  if (lane.audioBatch.length >= AUDIO_BATCH_FRAMES) flushInterviewBatch(side);
+}
+
+function flushInterviewBatch(side) {
+  const lane = interview.lanes[side];
+  if (!lane.audioBatch.length) return;
+  if (!lane.ws || lane.ws.readyState !== 1) { lane.audioBatch = []; return; }
+  let total = 0;
+  for (const b of lane.audioBatch) total += b.length;
+  const merged = new Int16Array(total);
+  let off = 0;
+  for (const b of lane.audioBatch) { merged.set(b, off); off += b.length; }
+  lane.audioBatch = [];
+  try {
+    lane.ws.send(JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: base64FromInt16(merged),
+    }));
+  } catch {}
+}
+
+async function openInterviewLane(side, srcLang, tgtLang) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/api/solo/oai?ticket=${encodeURIComponent(interview.ticket)}`;
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  interview.lanes[side].ws = ws;
+
+  ws.addEventListener('message', (e) => {
+    if (typeof e.data !== 'string') return;
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    handleInterviewEvent(side, ev);
+  });
+  ws.addEventListener('close', () => {
+    if (interview.lanes[side].ws === ws) interview.lanes[side].ws = null;
+    if (interview.active) setIvStatus(side === 'left' ? '左路连接断开' : '右路连接断开', 'err');
+  });
+
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', () => resolve(), { once: true });
+    ws.addEventListener('error', () => reject(new Error(side + ' WS 连接失败')), { once: true });
+  });
+
+  const src = langByCode(srcLang);
+  const tgt = langByCode(tgtLang);
+  ws.send(JSON.stringify({
+    type: 'session.update',
+    session: {
+      modalities: ['text'],
+      instructions:
+        `You are a professional simultaneous interpreter. ` +
+        `Translate the user's ${src.english} utterance into natural, idiomatic ${tgt.english}. ` +
+        `Output ONLY the ${tgt.english} translation — no explanations, no source text, no labels. ` +
+        `Preserve tone.`,
+      input_audio_format: 'pcm16',
+      input_audio_transcription: { model: 'gpt-4o-transcribe', language: src.whisper },
+      turn_detection: {
+        type: 'server_vad',
+        threshold: 0.5,
+        prefix_padding_ms: 300,
+        silence_duration_ms: 600,
+        create_response: true,
+      },
+      temperature: 0.6,
+    },
+  }));
+}
+
+function handleInterviewEvent(side, ev) {
+  const lane = interview.lanes[side];
+  switch (ev.type) {
+    case 'conversation.item.created':
+      if (ev.item && ev.item.role === 'user') {
+        lane.lastUserItemId = ev.item.id;
+        ensureIvMsg(side, ev.item.id);
+      }
+      break;
+    case 'conversation.item.input_audio_transcription.delta':
+      updateIvSource(side, ev.item_id, ev.delta || '', false, true);
+      break;
+    case 'conversation.item.input_audio_transcription.completed':
+      updateIvSource(side, ev.item_id, ev.transcript || '', true, false);
+      break;
+    case 'response.created':
+      if (ev.response?.id && lane.lastUserItemId) {
+        lane.responseToMsg.set(ev.response.id, lane.lastUserItemId);
+      }
+      break;
+    case 'response.text.delta':
+    case 'response.output_text.delta':
+    case 'response.audio_transcript.delta':
+    case 'response.output_audio_transcript.delta':
+      updateIvTranslation(side, ev.response_id, ev.delta || '', false);
+      break;
+    case 'response.text.done':
+    case 'response.output_text.done':
+      updateIvTranslation(side, ev.response_id, '', true, ev.text || '');
+      break;
+    case 'response.audio_transcript.done':
+    case 'response.output_audio_transcript.done':
+      updateIvTranslation(side, ev.response_id, '', true, ev.transcript || '');
+      break;
+    case 'error':
+      console.error('[interview ' + side + ']', ev);
+      setIvStatus('错误: ' + (ev.error?.message || 'unknown'), 'err');
+      break;
+    default:
+      if (ev.type && ev.type.includes('error')) console.debug('[interview ' + side + ']', ev.type, ev);
+  }
+}
+
+function ensureIvMsg(side, msgId) {
+  const lane = interview.lanes[side];
+  let e = lane.messages.get(msgId);
+  if (e) return e;
+  const srcLang = side === 'left' ? interview.leftLang : interview.rightLang;
+  const tgtLang = side === 'left' ? interview.rightLang : interview.leftLang;
+  e = {
+    side, sourceLang: srcLang, translationLang: tgtLang,
+    sourceText: '', translationText: '',
+    sourceFinal: false, translationFinal: false,
+    ts: Date.now(), historyEl: null,
+  };
+  lane.messages.set(msgId, e);
+  lane.order.push(msgId);
+  return e;
+}
+
+function updateIvSource(side, msgId, payload, done, append) {
+  const e = ensureIvMsg(side, msgId);
+  if (done) { e.sourceText = payload; e.sourceFinal = true; }
+  else if (append) e.sourceText += payload;
+  else e.sourceText = payload;
+  paintIvNow(side, e);
+  maybeArchiveIv(side, msgId, e);
+}
+
+function updateIvTranslation(side, respId, delta, done, fullText) {
+  const lane = interview.lanes[side];
+  const msgId = lane.responseToMsg.get(respId) || lane.lastUserItemId;
+  if (!msgId) return;
+  const e = ensureIvMsg(side, msgId);
+  if (done) {
+    if (fullText && fullText.length >= e.translationText.length) e.translationText = fullText;
+    e.translationFinal = true;
+  } else {
+    e.translationText += delta;
+  }
+  paintIvNow(side, e);
+  maybeArchiveIv(side, msgId, e);
+}
+
+function paintIvNow(side, e) {
+  setIvNow(side,
+    e.sourceText || (e.sourceFinal ? '' : '…'),
+    e.translationText || (e.translationFinal ? '' : '…'),
+    !e.sourceFinal, !e.translationFinal);
+}
+
+function setIvNow(side, sourceText, translationText, sourceInterim, translationInterim) {
+  const cap = side === 'left' ? 'Left' : 'Right';
+  const s = $('iv' + cap + 'Source');
+  const t = $('iv' + cap + 'Translation');
+  if (s) { s.textContent = sourceText; s.classList.toggle('interim', !!sourceInterim); }
+  if (t) { t.textContent = translationText; t.classList.toggle('interim', !!translationInterim); }
+}
+
+function maybeArchiveIv(side, msgId, e) {
+  if (!e.sourceFinal || !e.translationFinal) return;
+  if (e.historyEl) return;
+  const row = document.createElement('div');
+  row.className = 'h-row';
+  row.innerHTML =
+    `<span class="h-src">${escapeHtml(e.sourceText)}</span>` +
+    `<span class="h-tr">${escapeHtml(e.translationText)}</span>`;
+  const list = $('iv' + (side === 'left' ? 'Left' : 'Right') + 'History');
+  list.appendChild(row);
+  list.scrollTop = list.scrollHeight;
+  e.historyEl = row;
+  // Now-pane clears to make room for the next utterance.
+  setIvNow(side, '', '', false, false);
+}
+
+function setIvStatus(text, cls) {
+  const el = $('ivStatus');
+  el.textContent = text;
+  el.className = 'iv-status' + (cls ? ' ' + cls : '');
+}
+
+function cleanupInterviewAudio() {
+  try { interview.splitter && interview.splitter.disconnect(); } catch {}
+  try { interview.leftWorklet && interview.leftWorklet.disconnect(); } catch {}
+  try { interview.rightWorklet && interview.rightWorklet.disconnect(); } catch {}
+  if (interview.audioCtx) { try { interview.audioCtx.close(); } catch {} }
+  if (interview.stream) interview.stream.getTracks().forEach((t) => t.stop());
+  interview.audioCtx = interview.splitter = interview.leftWorklet = interview.rightWorklet = null;
+  interview.stream = null;
+}
+
+function leaveInterview() {
+  interview.active = false;
+  for (const side of ['left', 'right']) {
+    const lane = interview.lanes[side];
+    if (lane.ws) { try { lane.ws.close(); } catch {} lane.ws = null; }
+    lane.audioBatch = [];
+  }
+  cleanupInterviewAudio();
+  showView('view-home');
+}
+
+function exportInterviewConversation() {
+  // Merge both lanes by timestamp.
+  const all = [];
+  for (const side of ['left', 'right']) {
+    const lane = interview.lanes[side];
+    for (const id of lane.order) {
+      const e = lane.messages.get(id);
+      if (e) all.push(e);
+    }
+  }
+  all.sort((a, b) => a.ts - b.ts);
+  const rows = all.map((e) => {
+    const who = e.side === 'left' ? '左' : '右';
+    const t = new Date(e.ts).toLocaleTimeString();
+    return `<div class="m"><div class="h"><b>${who}</b> <span class="t">${t}</span></div>
+      <div class="s">${escapeHtml(e.sourceText)}</div>
+      <div class="r">${escapeHtml(e.translationText)}</div></div>`;
+  }).join('');
+  const stamp = new Date().toLocaleString();
+  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>双人采访记录 ${stamp}</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#111;max-width:780px;margin:2rem auto;padding:0 1rem}
+h1{font-size:1.2rem;margin:0 0 1rem}.meta{color:#666;font-size:.85rem;margin-bottom:1.5rem}
+.m{padding:.6rem 0;border-bottom:1px solid #eee}.h{font-size:.85rem;color:#555;margin-bottom:.3rem}
+.h .t{margin-left:.5rem;color:#999;font-weight:400}.s,.r{margin:.15rem 0;line-height:1.5}
+.s{color:#111}.r{color:#0050a0}@media print{body{margin:1cm}.m{break-inside:avoid}}
+</style></head><body><h1>双人采访记录</h1>
+<div class="meta">导出时间：${stamp} · 共 ${all.length} 条</div>
+${rows || '<p style="color:#666">这次采访没有任何记录。</p>'}
+<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script>
+</body></html>`;
+  const w = window.open('', '_blank');
+  if (!w) { alert('浏览器拦截了弹窗，无法导出。请允许此站点弹窗后重试。'); return; }
+  w.document.open(); w.document.write(html); w.document.close();
+}
+
+$('ivLeave').addEventListener('click', leaveInterview);
+$('ivExport').addEventListener('click', exportInterviewConversation);
+
+window.addEventListener('beforeunload', () => { leaveRoom(); leaveInterview(); });
