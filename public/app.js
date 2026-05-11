@@ -59,6 +59,10 @@ const room = {
 
   // Display mode for finalized messages: bilingual | mine | peer.
   displayMode: localStorage.getItem('rti_display_mode') || 'bilingual',
+  // When on, peer's finalized translation is read aloud via the browser's
+  // TTS — wearing earphones turns this into real-time simultaneous
+  // interpretation in the listener's language.
+  speakPeer: localStorage.getItem('rti_room_speak_peer') === '1',
 
   micEnabled: false,
 };
@@ -853,6 +857,23 @@ function applyPeerSubtitle(msg) {
     entry.translationFinal = !!msg.translation.final;
   }
   refreshMessageDom(entry);
+  maybeSpeakPeerTranslation(msg.msgId, entry);
+}
+
+function maybeSpeakPeerTranslation(msgId, entry) {
+  // Room mode + 🔊 toggle on → speak the finalized peer translation out
+  // loud. Wearing earphones, this becomes a real-time simultaneous-
+  // interpreting feed in your own language.
+  if (!room.speakPeer) return;
+  if (!entry.translationFinal) return;
+  if (!entry.translationText) return;
+  if (entry.spokenTts) return;
+  entry.spokenTts = true;
+  try {
+    const u = new SpeechSynthesisUtterance(entry.translationText);
+    if (entry.translationLang) u.lang = entry.translationLang;
+    speechSynthesis.speak(u);
+  } catch {}
 }
 
 function scrollBottom(el) { el.scrollTop = el.scrollHeight; }
@@ -874,6 +895,23 @@ document.querySelectorAll('.mode-btn').forEach((btn) => {
   btn.addEventListener('click', () => applyDisplayMode(btn.dataset.mode));
 });
 applyDisplayMode(room.displayMode);
+
+function updateRoomSpeakPeerBtn() {
+  const btn = $('roomSpeakPeer');
+  if (!btn) return;
+  btn.classList.toggle('active', !!room.speakPeer);
+  btn.textContent = room.speakPeer ? '🔊 同传朗读 开' : '🔊 同传朗读';
+}
+
+$('roomSpeakPeer').addEventListener('click', () => {
+  room.speakPeer = !room.speakPeer;
+  localStorage.setItem('rti_room_speak_peer', room.speakPeer ? '1' : '0');
+  updateRoomSpeakPeerBtn();
+  if (!room.speakPeer) {
+    try { speechSynthesis.cancel(); } catch {}
+  }
+});
+updateRoomSpeakPeerBtn();
 
 // ---------- Export ----------
 

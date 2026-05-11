@@ -230,6 +230,11 @@ form small { display: block; margin-top: 0.3rem; font-size: 0.75rem; color: var(
 .mode-btn:last-child { border-right: 0; }
 .mode-btn:hover { color: var(--fg); }
 .mode-btn.active { background: var(--accent); color: #fff; }
+.conv-toolbar .btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
 .btn.small { padding: 0.35rem 0.8rem; font-size: 0.82rem; }
 
 /* Conversation list */
